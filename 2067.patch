@@ -1,0 +1,3541 @@
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-backend-native-types.h package.new/mutter/src/backends/native/meta-backend-native-types.h
+--- package.orig/mutter/src/backends/native/meta-backend-native-types.h	2021-11-10 10:39:31.524825996 -0330
++++ package.new/mutter/src/backends/native/meta-backend-native-types.h	2021-11-10 10:43:23.983205358 -0330
+@@ -31,6 +31,7 @@
+ typedef struct _MetaCrtcModeVirtual MetaCrtcModeVirtual;
+ typedef struct _MetaDevicePool MetaDevicePool;
+ typedef struct _MetaDeviceFile MetaDeviceFile;
++typedef struct _MetaDrmBuffer MetaDrmBuffer;
+ 
+ typedef enum _MetaSeatNativeFlag
+ {
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-cursor-renderer-native.c package.new/mutter/src/backends/native/meta-cursor-renderer-native.c
+--- package.orig/mutter/src/backends/native/meta-cursor-renderer-native.c	2021-11-10 10:39:31.524825996 -0330
++++ package.new/mutter/src/backends/native/meta-cursor-renderer-native.c	2021-11-10 10:42:55.636083650 -0330
+@@ -1260,6 +1260,7 @@
+       uint8_t buf[4 * cursor_width * cursor_height];
+       uint i;
+       g_autoptr (GError) error = NULL;
++      MetaDrmBufferFlags flags;
+       MetaDrmBufferGbm *buffer_gbm;
+ 
+       device_file = meta_device_pool_open (device_pool,
+@@ -1293,7 +1294,9 @@
+           return;
+         }
+ 
+-      buffer_gbm = meta_drm_buffer_gbm_new_take (device_file, bo, FALSE, &error);
++      flags = META_DRM_BUFFER_FLAG_DISABLE_MODIFIERS;
++      buffer_gbm = meta_drm_buffer_gbm_new_take (device_file, bo, flags,
++                                                 &error);
+       if (!buffer_gbm)
+         {
+           meta_warning ("Failed to create DRM buffer wrapper: %s",
+@@ -1587,6 +1590,7 @@
+       struct gbm_device *gbm_device;
+       struct gbm_bo *bo;
+       g_autoptr (GError) error = NULL;
++      MetaDrmBufferFlags flags;
+       MetaDrmBufferGbm *buffer_gbm;
+ 
+       device_file = meta_device_pool_open (device_pool,
+@@ -1633,7 +1637,9 @@
+ 
+       unset_can_preprocess (cursor_sprite);
+ 
+-      buffer_gbm = meta_drm_buffer_gbm_new_take (device_file, bo, FALSE, &error);
++      flags = META_DRM_BUFFER_FLAG_DISABLE_MODIFIERS;
++      buffer_gbm = meta_drm_buffer_gbm_new_take (device_file, bo, flags,
++                                                 &error);
+       if (!buffer_gbm)
+         {
+           meta_warning ("Failed to create DRM buffer wrapper: %s",
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-drm-buffer.c package.new/mutter/src/backends/native/meta-drm-buffer.c
+--- package.orig/mutter/src/backends/native/meta-drm-buffer.c	2021-11-10 10:39:31.524825996 -0330
++++ package.new/mutter/src/backends/native/meta-drm-buffer.c	2021-11-10 10:43:07.502132392 -0330
+@@ -31,6 +31,8 @@
+ #include "backends/native/meta-device-pool.h"
+ #include "backends/native/meta-kms-utils.h"
+ 
++#include "meta-private-enum-types.h"
++
+ #define INVALID_FB_ID 0U
+ 
+ enum
+@@ -38,6 +40,7 @@
+   PROP_0,
+ 
+   PROP_DEVICE_FILE,
++  PROP_FLAGS,
+ 
+   N_PROPS
+ };
+@@ -47,6 +50,8 @@
+ typedef struct _MetaDrmBufferPrivate
+ {
+   MetaDeviceFile *device_file;
++  MetaDrmBufferFlags flags;
++
+   uint32_t fb_id;
+ } MetaDrmBufferPrivate;
+ 
+@@ -62,10 +67,21 @@
+ }
+ 
+ gboolean
+-meta_drm_buffer_ensure_fb_id (MetaDrmBuffer        *buffer,
+-                              gboolean              use_modifiers,
+-                              const MetaDrmFbArgs  *fb_args,
+-                              GError              **error)
++meta_drm_buffer_ensure_fb_id (MetaDrmBuffer  *buffer,
++                              GError        **error)
++{
++  MetaDrmBufferPrivate *priv = meta_drm_buffer_get_instance_private (buffer);
++
++  if (priv->fb_id)
++    return TRUE;
++
++  return META_DRM_BUFFER_GET_CLASS (buffer)->ensure_fb_id (buffer, error);
++}
++
++gboolean
++meta_drm_buffer_do_ensure_fb_id (MetaDrmBuffer        *buffer,
++                                 const MetaDrmFbArgs  *fb_args,
++                                 GError              **error)
+ {
+   MetaDrmBufferPrivate *priv = meta_drm_buffer_get_instance_private (buffer);
+   int fd;
+@@ -74,7 +90,8 @@
+ 
+   fd = meta_device_file_get_fd (priv->device_file);
+ 
+-  if (use_modifiers && fb_args->modifiers[0] != DRM_FORMAT_MOD_INVALID)
++  if (!(priv->flags & META_DRM_BUFFER_FLAG_DISABLE_MODIFIERS) &&
++      fb_args->modifiers[0] != DRM_FORMAT_MOD_INVALID)
+     {
+       if (drmModeAddFB2WithModifiers (fd,
+                                       fb_args->width,
+@@ -153,6 +170,13 @@
+   priv->fb_id = 0;
+ }
+ 
++int
++meta_drm_buffer_export_fd (MetaDrmBuffer  *buffer,
++                           GError        **error)
++{
++  return META_DRM_BUFFER_GET_CLASS (buffer)->export_fd (buffer, error);
++}
++
+ uint32_t
+ meta_drm_buffer_get_fb_id (MetaDrmBuffer *buffer)
+ {
+@@ -179,12 +203,31 @@
+   return META_DRM_BUFFER_GET_CLASS (buffer)->get_stride (buffer);
+ }
+ 
++int
++meta_drm_buffer_get_bpp (MetaDrmBuffer *buffer)
++{
++  return META_DRM_BUFFER_GET_CLASS (buffer)->get_bpp (buffer);
++}
++
+ uint32_t
+ meta_drm_buffer_get_format (MetaDrmBuffer *buffer)
+ {
+   return META_DRM_BUFFER_GET_CLASS (buffer)->get_format (buffer);
+ }
+ 
++int
++meta_drm_buffer_get_offset (MetaDrmBuffer *buffer,
++                            int            plane)
++{
++  return META_DRM_BUFFER_GET_CLASS (buffer)->get_offset (buffer, plane);
++}
++
++uint32_t
++meta_drm_buffer_get_modifier (MetaDrmBuffer *buffer)
++{
++  return META_DRM_BUFFER_GET_CLASS (buffer)->get_modifier (buffer);
++}
++
+ gboolean
+ meta_drm_buffer_supports_fill_timings (MetaDrmBuffer *buffer)
+ {
+@@ -220,6 +263,9 @@
+     case PROP_DEVICE_FILE:
+       g_value_set_pointer (value, priv->device_file);
+       break;
++    case PROP_FLAGS:
++      g_value_set_flags (value, priv->flags);
++      break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+       break;
+@@ -240,6 +286,9 @@
+     case PROP_DEVICE_FILE:
+       priv->device_file = g_value_get_pointer (value);
+       break;
++    case PROP_FLAGS:
++      priv->flags = g_value_get_flags (value);
++      break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+       break;
+@@ -292,5 +341,14 @@
+                           G_PARAM_READWRITE |
+                           G_PARAM_CONSTRUCT_ONLY |
+                           G_PARAM_STATIC_STRINGS);
++  obj_props[PROP_FLAGS] =
++    g_param_spec_flags ("flags",
++                        "flags",
++                        "MetaDrmBufferFlags",
++                        META_TYPE_DRM_BUFFER_FLAGS,
++                        META_DRM_BUFFER_FLAG_NONE,
++                        G_PARAM_READWRITE |
++                        G_PARAM_CONSTRUCT_ONLY |
++                        G_PARAM_STATIC_STRINGS);
+   g_object_class_install_properties (object_class, N_PROPS, obj_props);
+ }
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-drm-buffer-dumb.c package.new/mutter/src/backends/native/meta-drm-buffer-dumb.c
+--- package.orig/mutter/src/backends/native/meta-drm-buffer-dumb.c	2021-11-10 10:39:31.524825996 -0330
++++ package.new/mutter/src/backends/native/meta-drm-buffer-dumb.c	2021-11-10 10:43:07.502132392 -0330
+@@ -25,6 +25,7 @@
+ 
+ #include "backends/native/meta-drm-buffer-dumb.h"
+ 
++#include <drm_fourcc.h>
+ #include <gio/gio.h>
+ #include <xf86drm.h>
+ #include <fcntl.h>
+@@ -44,11 +45,21 @@
+   int stride_bytes;
+   uint32_t drm_format;
+   int dmabuf_fd;
++  int offset;
+ };
+ 
+ G_DEFINE_TYPE (MetaDrmBufferDumb, meta_drm_buffer_dumb, META_TYPE_DRM_BUFFER)
+ 
+ static int
++meta_drm_buffer_dumb_export_fd (MetaDrmBuffer  *buffer,
++                                GError        **error)
++{
++  g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
++               "Can't export fd for dumb buffer");
++  return -1;
++}
++
++static int
+ meta_drm_buffer_dumb_get_width (MetaDrmBuffer *buffer)
+ {
+   MetaDrmBufferDumb *buffer_dumb = META_DRM_BUFFER_DUMB (buffer);
+@@ -81,6 +92,84 @@
+ }
+ 
+ static int
++meta_drm_buffer_dumb_get_bpp (MetaDrmBuffer *buffer)
++{
++  MetaDrmBufferDumb *buffer_dumb = META_DRM_BUFFER_DUMB (buffer);
++
++  switch (buffer_dumb->drm_format)
++    {
++    case DRM_FORMAT_C8:
++    case DRM_FORMAT_R8:
++    case DRM_FORMAT_RGB332:
++    case DRM_FORMAT_BGR233:
++      return 8;
++    case DRM_FORMAT_GR88:
++    case DRM_FORMAT_XRGB4444:
++    case DRM_FORMAT_XBGR4444:
++    case DRM_FORMAT_RGBX4444:
++    case DRM_FORMAT_BGRX4444:
++    case DRM_FORMAT_ARGB4444:
++    case DRM_FORMAT_ABGR4444:
++    case DRM_FORMAT_RGBA4444:
++    case DRM_FORMAT_BGRA4444:
++    case DRM_FORMAT_XRGB1555:
++    case DRM_FORMAT_XBGR1555:
++    case DRM_FORMAT_RGBX5551:
++    case DRM_FORMAT_BGRX5551:
++    case DRM_FORMAT_ARGB1555:
++    case DRM_FORMAT_ABGR1555:
++    case DRM_FORMAT_RGBA5551:
++    case DRM_FORMAT_BGRA5551:
++    case DRM_FORMAT_RGB565:
++    case DRM_FORMAT_BGR565:
++      return 16;
++    case DRM_FORMAT_RGB888:
++    case DRM_FORMAT_BGR888:
++      return 24;
++    case DRM_FORMAT_XRGB8888:
++    case DRM_FORMAT_XBGR8888:
++    case DRM_FORMAT_RGBX8888:
++    case DRM_FORMAT_BGRX8888:
++    case DRM_FORMAT_ARGB8888:
++    case DRM_FORMAT_ABGR8888:
++    case DRM_FORMAT_RGBA8888:
++    case DRM_FORMAT_BGRA8888:
++    case DRM_FORMAT_XRGB2101010:
++    case DRM_FORMAT_XBGR2101010:
++    case DRM_FORMAT_RGBX1010102:
++    case DRM_FORMAT_BGRX1010102:
++    case DRM_FORMAT_ARGB2101010:
++    case DRM_FORMAT_ABGR2101010:
++    case DRM_FORMAT_RGBA1010102:
++    case DRM_FORMAT_BGRA1010102:
++      return 32;
++    case DRM_FORMAT_XBGR16161616F:
++    case DRM_FORMAT_ABGR16161616F:
++      return 64;
++    default:
++      g_warn_if_reached ();
++      return 0;
++    }
++}
++
++static int
++meta_drm_buffer_dumb_get_offset (MetaDrmBuffer *buffer,
++                                 int            plane)
++{
++  MetaDrmBufferDumb *buffer_dumb = META_DRM_BUFFER_DUMB (buffer);
++
++  g_warn_if_fail (plane == 0);
++
++  return buffer_dumb->offset;
++}
++
++static uint32_t
++meta_drm_buffer_dumb_get_modifier (MetaDrmBuffer *buffer)
++{
++  return DRM_FORMAT_MOD_LINEAR;
++}
++
++static int
+ handle_to_dmabuf_fd (MetaDrmBufferDumb  *buffer_dumb,
+                      GError            **error)
+ {
+@@ -162,7 +251,7 @@
+     .handles = { create_arg.handle },
+     .strides = { create_arg.pitch },
+   };
+-  if (!meta_drm_buffer_ensure_fb_id (buffer, FALSE, &fb_args, error))
++  if (!meta_drm_buffer_do_ensure_fb_id (buffer, &fb_args, error))
+     goto err_add_fb;
+ 
+   map_arg = (struct drm_mode_map_dumb) {
+@@ -196,6 +285,7 @@
+   buffer_dumb->height = height;
+   buffer_dumb->stride_bytes = create_arg.pitch;
+   buffer_dumb->drm_format = format;
++  buffer_dumb->offset = map_arg.offset;
+ 
+   return TRUE;
+ 
+@@ -222,6 +312,7 @@
+ 
+   buffer_dumb = g_object_new (META_TYPE_DRM_BUFFER_DUMB,
+                               "device-file", device_file,
++                              "flags", META_DRM_BUFFER_FLAG_DISABLE_MODIFIERS,
+                               NULL);
+ 
+   if (!init_dumb_buffer (buffer_dumb, width, height, format, error))
+@@ -280,8 +371,12 @@
+ 
+   object_class->finalize = meta_drm_buffer_dumb_finalize;
+ 
++  buffer_class->export_fd = meta_drm_buffer_dumb_export_fd;
+   buffer_class->get_width = meta_drm_buffer_dumb_get_width;
+   buffer_class->get_height = meta_drm_buffer_dumb_get_height;
+   buffer_class->get_stride = meta_drm_buffer_dumb_get_stride;
++  buffer_class->get_bpp = meta_drm_buffer_dumb_get_bpp;
+   buffer_class->get_format = meta_drm_buffer_dumb_get_format;
++  buffer_class->get_offset = meta_drm_buffer_dumb_get_offset;
++  buffer_class->get_modifier = meta_drm_buffer_dumb_get_modifier;
+ }
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-drm-buffer-gbm.c package.new/mutter/src/backends/native/meta-drm-buffer-gbm.c
+--- package.orig/mutter/src/backends/native/meta-drm-buffer-gbm.c	2021-11-10 10:39:31.524825996 -0330
++++ package.new/mutter/src/backends/native/meta-drm-buffer-gbm.c	2021-11-10 10:43:07.502132392 -0330
+@@ -58,6 +58,24 @@
+ }
+ 
+ static int
++meta_drm_buffer_gbm_export_fd (MetaDrmBuffer  *buffer,
++                               GError        **error)
++{
++  MetaDrmBufferGbm *buffer_gbm = META_DRM_BUFFER_GBM (buffer);
++  int fd;
++
++  fd = gbm_bo_get_fd (buffer_gbm->bo);
++  if (fd == -1)
++    {
++      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
++                   "Failed to export buffer fd: %s", g_strerror (errno));
++      return -1;
++    }
++
++  return fd;
++}
++
++static int
+ meta_drm_buffer_gbm_get_width (MetaDrmBuffer *buffer)
+ {
+   MetaDrmBufferGbm *buffer_gbm = META_DRM_BUFFER_GBM (buffer);
+@@ -81,6 +99,14 @@
+   return gbm_bo_get_stride (buffer_gbm->bo);
+ }
+ 
++static int
++meta_drm_buffer_gbm_get_bpp (MetaDrmBuffer *buffer)
++{
++  MetaDrmBufferGbm *buffer_gbm = META_DRM_BUFFER_GBM (buffer);
++
++  return gbm_bo_get_bpp (buffer_gbm->bo);
++}
++
+ static uint32_t
+ meta_drm_buffer_gbm_get_format (MetaDrmBuffer *buffer)
+ {
+@@ -89,13 +115,30 @@
+   return gbm_bo_get_format (buffer_gbm->bo);
+ }
+ 
++static int
++meta_drm_buffer_gbm_get_offset (MetaDrmBuffer *buffer,
++                                int            plane)
++{
++  MetaDrmBufferGbm *buffer_gbm = META_DRM_BUFFER_GBM (buffer);
++
++  return gbm_bo_get_offset (buffer_gbm->bo, plane);
++}
++
++static uint32_t
++meta_drm_buffer_gbm_get_modifier (MetaDrmBuffer *buffer)
++{
++  MetaDrmBufferGbm *buffer_gbm = META_DRM_BUFFER_GBM (buffer);
++
++  return gbm_bo_get_modifier (buffer_gbm->bo);
++}
++
+ static gboolean
+-init_fb_id (MetaDrmBufferGbm  *buffer_gbm,
+-            struct gbm_bo     *bo,
+-            gboolean           use_modifiers,
+-            GError           **error)
++meta_drm_buffer_gbm_ensure_fb_id (MetaDrmBuffer  *buffer,
++                                  GError        **error)
+ {
++  MetaDrmBufferGbm *buffer_gbm = META_DRM_BUFFER_GBM (buffer);
+   MetaDrmFbArgs fb_args = { 0, };
++  struct gbm_bo *bo = buffer_gbm->bo;
+ 
+   if (gbm_bo_get_handle_for_plane (bo, 0).s32 == -1)
+     {
+@@ -122,8 +165,8 @@
+   fb_args.height = gbm_bo_get_height (bo);
+   fb_args.format = gbm_bo_get_format (bo);
+ 
+-  if (!meta_drm_buffer_ensure_fb_id (META_DRM_BUFFER (buffer_gbm),
+-                                     use_modifiers, &fb_args, error))
++  if (!meta_drm_buffer_do_ensure_fb_id (META_DRM_BUFFER (buffer_gbm),
++                                        &fb_args, error))
+     return FALSE;
+ 
+   return TRUE;
+@@ -131,7 +174,6 @@
+ 
+ static gboolean
+ lock_front_buffer (MetaDrmBufferGbm  *buffer_gbm,
+-                   gboolean           use_modifiers,
+                    GError           **error)
+ {
+   buffer_gbm->bo = gbm_surface_lock_front_buffer (buffer_gbm->surface);
+@@ -144,23 +186,24 @@
+       return FALSE;
+     }
+ 
+-  return init_fb_id (buffer_gbm, buffer_gbm->bo, use_modifiers, error);
++  return meta_drm_buffer_gbm_ensure_fb_id (META_DRM_BUFFER (buffer_gbm), error);
+ }
+ 
+ MetaDrmBufferGbm *
+ meta_drm_buffer_gbm_new_lock_front (MetaDeviceFile      *device_file,
+                                     struct gbm_surface  *gbm_surface,
+-                                    gboolean             use_modifiers,
++                                    MetaDrmBufferFlags   flags,
+                                     GError             **error)
+ {
+   MetaDrmBufferGbm *buffer_gbm;
+ 
+   buffer_gbm = g_object_new (META_TYPE_DRM_BUFFER_GBM,
+                              "device-file", device_file,
++                             "flags", flags,
+                              NULL);
+   buffer_gbm->surface = gbm_surface;
+ 
+-  if (!lock_front_buffer (buffer_gbm, use_modifiers, error))
++  if (!lock_front_buffer (buffer_gbm, error))
+     {
+       g_object_unref (buffer_gbm);
+       return NULL;
+@@ -170,23 +213,17 @@
+ }
+ 
+ MetaDrmBufferGbm *
+-meta_drm_buffer_gbm_new_take (MetaDeviceFile  *device_file,
+-                              struct gbm_bo   *bo,
+-                              gboolean         use_modifiers,
+-                              GError         **error)
++meta_drm_buffer_gbm_new_take (MetaDeviceFile      *device_file,
++                              struct gbm_bo       *bo,
++                              MetaDrmBufferFlags   flags,
++                              GError             **error)
+ {
+   MetaDrmBufferGbm *buffer_gbm;
+ 
+   buffer_gbm = g_object_new (META_TYPE_DRM_BUFFER_GBM,
+                              "device-file", device_file,
++                             "flags", flags,
+                              NULL);
+-
+-  if (!init_fb_id (buffer_gbm, bo, use_modifiers, error))
+-    {
+-      g_object_unref (buffer_gbm);
+-      return NULL;
+-    }
+-
+   buffer_gbm->bo = bo;
+ 
+   return buffer_gbm;
+@@ -466,9 +503,14 @@
+ 
+   object_class->finalize = meta_drm_buffer_gbm_finalize;
+ 
++  buffer_class->export_fd = meta_drm_buffer_gbm_export_fd;
++  buffer_class->ensure_fb_id = meta_drm_buffer_gbm_ensure_fb_id;
+   buffer_class->get_width = meta_drm_buffer_gbm_get_width;
+   buffer_class->get_height = meta_drm_buffer_gbm_get_height;
+   buffer_class->get_stride = meta_drm_buffer_gbm_get_stride;
++  buffer_class->get_bpp = meta_drm_buffer_gbm_get_bpp;
+   buffer_class->get_format = meta_drm_buffer_gbm_get_format;
++  buffer_class->get_offset = meta_drm_buffer_gbm_get_offset;
++  buffer_class->get_modifier = meta_drm_buffer_gbm_get_modifier;
+   buffer_class->fill_timings = meta_drm_buffer_gbm_fill_timings;
+ }
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-drm-buffer-gbm.h package.new/mutter/src/backends/native/meta-drm-buffer-gbm.h
+--- package.orig/mutter/src/backends/native/meta-drm-buffer-gbm.h	2021-11-10 10:39:31.524825996 -0330
++++ package.new/mutter/src/backends/native/meta-drm-buffer-gbm.h	2021-11-10 10:42:55.636083650 -0330
+@@ -35,14 +35,14 @@
+ 
+ MetaDrmBufferGbm * meta_drm_buffer_gbm_new_lock_front (MetaDeviceFile      *device_file,
+                                                        struct gbm_surface  *gbm_surface,
+-                                                       gboolean             use_modifiers,
++                                                       MetaDrmBufferFlags   flags,
+                                                        GError             **error);
+ 
+ 
+-MetaDrmBufferGbm * meta_drm_buffer_gbm_new_take (MetaDeviceFile  *device_file,
+-                                                 struct gbm_bo   *gbm_bo,
+-                                                 gboolean         use_modifiers,
+-                                                 GError         **error);
++MetaDrmBufferGbm * meta_drm_buffer_gbm_new_take (MetaDeviceFile      *device_file,
++                                                 struct gbm_bo       *gbm_bo,
++                                                 MetaDrmBufferFlags   flags,
++                                                 GError             **error);
+ 
+ struct gbm_bo * meta_drm_buffer_gbm_get_bo (MetaDrmBufferGbm *buffer_gbm);
+ 
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-drm-buffer.h package.new/mutter/src/backends/native/meta-drm-buffer.h
+--- package.orig/mutter/src/backends/native/meta-drm-buffer.h	2021-11-10 10:39:31.524825996 -0330
++++ package.new/mutter/src/backends/native/meta-drm-buffer.h	2021-11-10 10:43:07.502132392 -0330
+@@ -28,12 +28,24 @@
+ 
+ #include "cogl/cogl.h"
+ 
++typedef enum _MetaDrmBufferFlags
++{
++  META_DRM_BUFFER_FLAG_NONE = 0,
++  META_DRM_BUFFER_FLAG_DISABLE_MODIFIERS = 1 << 0,
++} MetaDrmBufferFlags;
++
+ #define META_TYPE_DRM_BUFFER (meta_drm_buffer_get_type ())
+ G_DECLARE_DERIVABLE_TYPE (MetaDrmBuffer,
+                           meta_drm_buffer,
+                           META, DRM_BUFFER,
+                           GObject)
+ 
++int meta_drm_buffer_export_fd (MetaDrmBuffer  *buffer,
++                               GError        **error);
++
++gboolean meta_drm_buffer_ensure_fb_id (MetaDrmBuffer  *buffer,
++                                       GError        **error);
++
+ uint32_t meta_drm_buffer_get_fb_id (MetaDrmBuffer *buffer);
+ 
+ int meta_drm_buffer_get_width (MetaDrmBuffer *buffer);
+@@ -42,8 +54,15 @@
+ 
+ int meta_drm_buffer_get_stride (MetaDrmBuffer *buffer);
+ 
++int meta_drm_buffer_get_bpp (MetaDrmBuffer *buffer);
++
+ uint32_t meta_drm_buffer_get_format (MetaDrmBuffer *buffer);
+ 
++int meta_drm_buffer_get_offset (MetaDrmBuffer *buffer,
++                                int            plane);
++
++uint32_t meta_drm_buffer_get_modifier (MetaDrmBuffer *buffer);
++
+ gboolean meta_drm_buffer_supports_fill_timings (MetaDrmBuffer *buffer);
+ 
+ gboolean meta_drm_buffer_fill_timings (MetaDrmBuffer  *buffer,
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-drm-buffer-import.c package.new/mutter/src/backends/native/meta-drm-buffer-import.c
+--- package.orig/mutter/src/backends/native/meta-drm-buffer-import.c	2021-11-10 10:39:31.524825996 -0330
++++ package.new/mutter/src/backends/native/meta-drm-buffer-import.c	2021-11-10 10:43:07.502132392 -0330
+@@ -45,6 +45,16 @@
+                META_TYPE_DRM_BUFFER)
+ 
+ static int
++meta_drm_buffer_import_export_fd (MetaDrmBuffer  *buffer,
++                                  GError        **error)
++{
++  MetaDrmBufferImport *buffer_import = META_DRM_BUFFER_IMPORT (buffer);
++
++  return meta_drm_buffer_export_fd (META_DRM_BUFFER (buffer_import->importee),
++                                    error);
++}
++
++static int
+ meta_drm_buffer_import_get_width (MetaDrmBuffer *buffer)
+ {
+   MetaDrmBufferImport *buffer_import = META_DRM_BUFFER_IMPORT (buffer);
+@@ -68,6 +78,14 @@
+   return meta_drm_buffer_get_stride (META_DRM_BUFFER (buffer_import->importee));
+ }
+ 
++static int
++meta_drm_buffer_import_get_bpp (MetaDrmBuffer *buffer)
++{
++  MetaDrmBufferImport *buffer_import = META_DRM_BUFFER_IMPORT (buffer);
++
++  return meta_drm_buffer_get_bpp (META_DRM_BUFFER (buffer_import->importee));
++}
++
+ static uint32_t
+ meta_drm_buffer_import_get_format (MetaDrmBuffer *buffer)
+ {
+@@ -76,6 +94,25 @@
+   return meta_drm_buffer_get_format (META_DRM_BUFFER (buffer_import->importee));
+ }
+ 
++static int
++meta_drm_buffer_import_get_offset (MetaDrmBuffer *buffer,
++                                   int            offset)
++{
++  MetaDrmBufferImport *buffer_import = META_DRM_BUFFER_IMPORT (buffer);
++  MetaDrmBuffer *importee = META_DRM_BUFFER (buffer_import->importee);
++
++  return meta_drm_buffer_get_offset (importee, offset);
++}
++
++static uint32_t
++meta_drm_buffer_import_get_modifier (MetaDrmBuffer *buffer)
++{
++  MetaDrmBufferImport *buffer_import = META_DRM_BUFFER_IMPORT (buffer);
++  MetaDrmBuffer *importee = META_DRM_BUFFER (buffer_import->importee);
++
++  return meta_drm_buffer_get_modifier (importee);
++}
++
+ static struct gbm_bo *
+ dmabuf_to_gbm_bo (struct gbm_device *importer,
+                   int                dmabuf_fd,
+@@ -144,10 +181,9 @@
+ 
+   fb_args.handles[0] = gbm_bo_get_handle (imported_bo).u32;
+ 
+-  ret = meta_drm_buffer_ensure_fb_id (META_DRM_BUFFER (buffer_import),
+-                                      FALSE /* use_modifiers */,
+-                                      &fb_args,
+-                                      error);
++  ret = meta_drm_buffer_do_ensure_fb_id (META_DRM_BUFFER (buffer_import),
++                                         &fb_args,
++                                         error);
+ 
+   gbm_bo_destroy (imported_bo);
+ 
+@@ -167,6 +203,7 @@
+ 
+   buffer_import = g_object_new (META_TYPE_DRM_BUFFER_IMPORT,
+                                 "device-file", device_file,
++                                "flags", META_DRM_BUFFER_FLAG_DISABLE_MODIFIERS,
+                                 NULL);
+   g_set_object (&buffer_import->importee, buffer_gbm);
+ 
+@@ -202,8 +239,12 @@
+ 
+   object_class->finalize = meta_drm_buffer_import_finalize;
+ 
++  buffer_class->export_fd = meta_drm_buffer_import_export_fd;
+   buffer_class->get_width = meta_drm_buffer_import_get_width;
+   buffer_class->get_height = meta_drm_buffer_import_get_height;
+   buffer_class->get_stride = meta_drm_buffer_import_get_stride;
++  buffer_class->get_bpp = meta_drm_buffer_import_get_bpp;
+   buffer_class->get_format = meta_drm_buffer_import_get_format;
++  buffer_class->get_offset = meta_drm_buffer_import_get_offset;
++  buffer_class->get_modifier = meta_drm_buffer_import_get_modifier;
+ }
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-drm-buffer-private.h package.new/mutter/src/backends/native/meta-drm-buffer-private.h
+--- package.orig/mutter/src/backends/native/meta-drm-buffer-private.h	2021-11-10 10:39:31.524825996 -0330
++++ package.new/mutter/src/backends/native/meta-drm-buffer-private.h	2021-11-10 10:43:07.502132392 -0330
+@@ -39,10 +39,20 @@
+ {
+   GObjectClass parent_class;
+ 
++  int (* export_fd) (MetaDrmBuffer  *buffer,
++                     GError        **error);
++
++  gboolean (* ensure_fb_id) (MetaDrmBuffer  *buffer,
++                             GError        **error);
++
+   int (* get_width) (MetaDrmBuffer *buffer);
+   int (* get_height) (MetaDrmBuffer *buffer);
+   int (* get_stride) (MetaDrmBuffer *buffer);
++  int (* get_bpp) (MetaDrmBuffer *buffer);
+   uint32_t (* get_format) (MetaDrmBuffer *buffer);
++  int (* get_offset) (MetaDrmBuffer *buffer,
++                      int            plane);
++  uint32_t (* get_modifier) (MetaDrmBuffer *buffer);
+ 
+   gboolean (* fill_timings) (MetaDrmBuffer  *buffer,
+                              CoglFrameInfo  *info,
+@@ -51,14 +61,8 @@
+ 
+ MetaDeviceFile * meta_drm_buffer_get_device_file (MetaDrmBuffer *buffer);
+ 
+-gboolean meta_drm_buffer_ensure_fb_id (MetaDrmBuffer        *buffer,
+-                                       gboolean              use_modifiers,
+-                                       const MetaDrmFbArgs  *fb_args,
+-                                       GError              **error);
+-
+-gboolean meta_drm_buffer_ensure_fb_in_impl (MetaDrmBuffer        *buffer,
+-                                            gboolean              use_modifiers,
+-                                            const MetaDrmFbArgs  *fb_args,
+-                                            GError              **error);
++gboolean meta_drm_buffer_do_ensure_fb_id (MetaDrmBuffer        *buffer,
++                                          const MetaDrmFbArgs  *fb_args,
++                                          GError              **error);
+ 
+ #endif /* META_DRM_BUFFER_PRIVATE_H */
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-kms-impl-device-atomic.c package.new/mutter/src/backends/native/meta-kms-impl-device-atomic.c
+--- package.orig/mutter/src/backends/native/meta-kms-impl-device-atomic.c	2021-11-10 10:39:31.524825996 -0330
++++ package.new/mutter/src/backends/native/meta-kms-impl-device-atomic.c	2021-11-10 10:43:07.502132392 -0330
+@@ -421,6 +421,9 @@
+ 
+   buffer = plane_assignment->buffer;
+ 
++  if (buffer && !meta_drm_buffer_ensure_fb_id (buffer, error))
++    return FALSE;
++
+   meta_topic (META_DEBUG_KMS,
+               "[atomic] Assigning %s plane (%u, %s) to %u, "
+               "%hdx%hd+%hd+%hd -> %dx%d+%d+%d",
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-kms-impl-device-simple.c package.new/mutter/src/backends/native/meta-kms-impl-device-simple.c
+--- package.orig/mutter/src/backends/native/meta-kms-impl-device-simple.c	2021-11-10 10:39:31.524825996 -0330
++++ package.new/mutter/src/backends/native/meta-kms-impl-device-simple.c	2021-11-10 10:43:07.503132397 -0330
+@@ -396,6 +396,9 @@
+         }
+ 
+       buffer = plane_assignment->buffer;
++      if (!meta_drm_buffer_ensure_fb_id (buffer, error))
++        return FALSE;
++
+       fb_id = meta_drm_buffer_get_fb_id (buffer);
+ 
+       for (l = mode_set->connectors; l; l = l->next)
+@@ -822,6 +825,9 @@
+       return FALSE;
+     }
+ 
++  if (!meta_drm_buffer_ensure_fb_id (plane_assignment->buffer, error))
++    return FALSE;
++
+   fill_connector_ids_array (cached_mode_set->connectors,
+                             &connectors,
+                             &n_connectors);
+@@ -926,6 +932,10 @@
+       return TRUE;
+     }
+ 
++  if (plane_assignment && plane_assignment->buffer &&
++      !meta_drm_buffer_ensure_fb_id (plane_assignment->buffer, error))
++    return FALSE;
++
+   fd = meta_kms_impl_device_get_fd (impl_device);
+   if (custom_page_flip)
+     {
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-onscreen-native.c package.new/mutter/src/backends/native/meta-onscreen-native.c
+--- package.orig/mutter/src/backends/native/meta-onscreen-native.c	2021-11-10 10:39:31.524825996 -0330
++++ package.new/mutter/src/backends/native/meta-onscreen-native.c	2021-11-10 10:43:43.522299551 -0330
+@@ -43,6 +43,8 @@
+ #include "backends/native/meta-kms-utils.h"
+ #include "backends/native/meta-kms.h"
+ #include "backends/native/meta-output-kms.h"
++#include "backends/native/meta-render-device-gbm.h"
++#include "backends/native/meta-render-device.h"
+ #include "backends/native/meta-renderer-native-gles3.h"
+ #include "backends/native/meta-renderer-native-private.h"
+ 
+@@ -369,6 +371,7 @@
+   MetaRendererView *view = user_data;
+   MetaEgl *egl = meta_onscreen_native_get_egl (onscreen_native);
+   MetaRendererNativeGpuData *renderer_gpu_data;
++  MetaRenderDevice *render_device;
+   EGLDisplay *egl_display;
+   EGLAttrib *acquire_attribs;
+   g_autoptr (GError) error = NULL;
+@@ -382,8 +385,9 @@
+   renderer_gpu_data =
+     meta_renderer_native_get_gpu_data (onscreen_native->renderer_native,
+                                        onscreen_native->render_gpu);
++  render_device = renderer_gpu_data->render_device;
+ 
+-  egl_display = renderer_gpu_data->egl_display;
++  egl_display = meta_render_device_get_egl_display (render_device);
+   if (!meta_egl_stream_consumer_acquire_attrib (egl,
+                                                 egl_display,
+                                                 onscreen_native->egl.stream,
+@@ -548,10 +552,14 @@
+   if (secondary_gpu_state->egl_surface != EGL_NO_SURFACE)
+     {
+       MetaRendererNativeGpuData *renderer_gpu_data;
++      MetaRenderDevice *render_device;
++      EGLDisplay egl_display;
+ 
+       renderer_gpu_data = secondary_gpu_state->renderer_gpu_data;
++      render_device = renderer_gpu_data->render_device;
++      egl_display = meta_render_device_get_egl_display (render_device);
+       meta_egl_destroy_surface (egl,
+-                                renderer_gpu_data->egl_display,
++                                egl_display,
+                                 secondary_gpu_state->egl_surface,
+                                 NULL);
+     }
+@@ -570,28 +578,21 @@
+                            MetaOnscreenNativeSecondaryGpuState *secondary_gpu_state)
+ {
+   MetaOnscreenNative *onscreen_native = META_ONSCREEN_NATIVE (onscreen);
+-  MetaGpuKms *gpu_kms;
+-  MetaDeviceFile *device_file;
+-  struct gbm_device *gbm_device;
+-  MetaDrmBufferGbm *buffer_gbm;
+-  MetaDrmBufferImport *buffer_import;
++  MetaRenderDevice *render_device;
+   g_autoptr (GError) error = NULL;
++  MetaDrmBuffer *imported_buffer;
+ 
+-  buffer_gbm = META_DRM_BUFFER_GBM (onscreen_native->gbm.next_fb);
+-
+-  gpu_kms = secondary_gpu_state->gpu_kms;
+-  device_file = secondary_gpu_state->renderer_gpu_data->device_file;
+-  gbm_device = meta_gbm_device_from_gpu (gpu_kms);
+-  buffer_import = meta_drm_buffer_import_new (device_file,
+-                                              gbm_device,
+-                                              buffer_gbm,
+-                                              &error);
+-  if (!buffer_import)
++  render_device = secondary_gpu_state->renderer_gpu_data->render_device;
++  imported_buffer =
++    meta_render_device_import_dma_buf (render_device,
++                                       onscreen_native->gbm.next_fb,
++                                       &error);
++  if (!imported_buffer)
+     {
+       meta_topic (META_DEBUG_KMS,
+                   "Zero-copy disabled for %s, "
+                   "meta_drm_buffer_import_new failed: %s",
+-                  meta_device_file_get_path (device_file),
++                  meta_render_device_get_name (render_device),
+                   error->message);
+ 
+       g_warn_if_fail (secondary_gpu_state->import_status ==
+@@ -620,7 +621,7 @@
+    * when we are sure to succeed.
+    */
+   g_clear_object (&secondary_gpu_state->gbm.next_fb);
+-  secondary_gpu_state->gbm.next_fb = META_DRM_BUFFER (buffer_import);
++  secondary_gpu_state->gbm.next_fb = imported_buffer;
+ 
+   if (secondary_gpu_state->import_status ==
+       META_SHARED_FRAMEBUFFER_IMPORT_STATUS_NONE)
+@@ -633,7 +634,7 @@
+ 
+       meta_topic (META_DEBUG_KMS,
+                   "Using zero-copy for %s succeeded once.",
+-                  meta_device_file_get_path (device_file));
++                  meta_render_device_get_name (render_device));
+     }
+ 
+   secondary_gpu_state->import_status =
+@@ -651,9 +652,12 @@
+   MetaRendererNative *renderer_native = renderer_gpu_data->renderer_native;
+   MetaEgl *egl = meta_renderer_native_get_egl (renderer_native);
+   MetaGles3 *gles3 = meta_renderer_native_get_gles3 (renderer_native);
++  MetaRenderDevice *render_device;
++  EGLDisplay egl_display;
+   GError *error = NULL;
+   gboolean use_modifiers;
+   MetaDeviceFile *device_file;
++  MetaDrmBufferFlags flags;
+   MetaDrmBufferGbm *buffer_gbm;
+   struct gbm_bo *bo;
+ 
+@@ -663,8 +667,11 @@
+   g_warn_if_fail (secondary_gpu_state->gbm.next_fb == NULL);
+   g_clear_object (&secondary_gpu_state->gbm.next_fb);
+ 
++  render_device = renderer_gpu_data->render_device;
++  egl_display = meta_render_device_get_egl_display (render_device);
++
+   if (!meta_egl_make_current (egl,
+-                              renderer_gpu_data->egl_display,
++                              egl_display,
+                               secondary_gpu_state->egl_surface,
+                               secondary_gpu_state->egl_surface,
+                               renderer_gpu_data->secondary.egl_context,
+@@ -682,7 +689,7 @@
+   bo = meta_drm_buffer_gbm_get_bo (buffer_gbm);
+   if (!meta_renderer_native_gles3_blit_shared_bo (egl,
+                                                   gles3,
+-                                                  renderer_gpu_data->egl_display,
++                                                  egl_display,
+                                                   renderer_gpu_data->secondary.egl_context,
+                                                   secondary_gpu_state->egl_surface,
+                                                   bo,
+@@ -694,7 +701,7 @@
+     }
+ 
+   if (!meta_egl_swap_buffers (egl,
+-                              renderer_gpu_data->egl_display,
++                              egl_display,
+                               secondary_gpu_state->egl_surface,
+                               &error))
+     {
+@@ -704,11 +711,16 @@
+     }
+ 
+   use_modifiers = meta_renderer_native_use_modifiers (renderer_native);
+-  device_file = secondary_gpu_state->renderer_gpu_data->device_file;
++  device_file = meta_render_device_get_device_file (render_device);
++
++  flags = META_DRM_BUFFER_FLAG_NONE;
++  if (!use_modifiers)
++    flags |= META_DRM_BUFFER_FLAG_DISABLE_MODIFIERS;
++
+   buffer_gbm =
+     meta_drm_buffer_gbm_new_lock_front (device_file,
+                                         secondary_gpu_state->gbm.surface,
+-                                        use_modifiers,
++                                        flags,
+                                         &error);
+   if (!buffer_gbm)
+     {
+@@ -890,10 +902,10 @@
+   if (secondary_gpu_state)
+     {
+       MetaRendererNativeGpuData *renderer_gpu_data;
+-      MetaDeviceFile *device_file;
++      MetaRenderDevice *render_device;
+ 
+       renderer_gpu_data = secondary_gpu_state->renderer_gpu_data;
+-      device_file = renderer_gpu_data->device_file;
++      render_device = renderer_gpu_data->render_device;
+       switch (renderer_gpu_data->secondary.copy_mode)
+         {
+         case META_SHARED_FRAMEBUFFER_COPY_MODE_SECONDARY_GPU:
+@@ -914,7 +926,7 @@
+                 {
+                   meta_topic (META_DEBUG_KMS,
+                               "Using primary GPU to copy for %s failed once.",
+-                              meta_device_file_get_path (device_file));
++                              meta_render_device_get_name (render_device));
+                   secondary_gpu_state->noted_primary_gpu_copy_failed = TRUE;
+                 }
+ 
+@@ -926,7 +938,7 @@
+             {
+               meta_topic (META_DEBUG_KMS,
+                           "Using primary GPU to copy for %s succeeded once.",
+-                          meta_device_file_get_path (device_file));
++                          meta_render_device_get_name (render_device));
+               secondary_gpu_state->noted_primary_gpu_copy_ok = TRUE;
+             }
+           break;
+@@ -1016,9 +1028,9 @@
+   ClutterFrame *frame = user_data;
+   CoglOnscreenClass *parent_class;
+   gboolean egl_context_changed = FALSE;
+-  gboolean use_modifiers;
+   MetaPowerSave power_save_mode;
+   g_autoptr (GError) error = NULL;
++  MetaDrmBufferFlags buffer_flags;
+   MetaDrmBufferGbm *buffer_gbm;
+   MetaKmsCrtc *kms_crtc;
+   MetaKmsDevice *kms_device;
+@@ -1040,18 +1052,22 @@
+ 
+   renderer_gpu_data = meta_renderer_native_get_gpu_data (renderer_native,
+                                                          render_gpu);
+-  render_device_file = renderer_gpu_data->device_file;
++  render_device_file =
++    meta_render_device_get_device_file (renderer_gpu_data->render_device);
+   switch (renderer_gpu_data->mode)
+     {
+     case META_RENDERER_NATIVE_MODE_GBM:
+       g_warn_if_fail (onscreen_native->gbm.next_fb == NULL);
+       g_clear_object (&onscreen_native->gbm.next_fb);
+ 
+-      use_modifiers = meta_renderer_native_use_modifiers (renderer_native);
++      buffer_flags = META_DRM_BUFFER_FLAG_NONE;
++      if (!meta_renderer_native_use_modifiers (renderer_native))
++        buffer_flags |= META_DRM_BUFFER_FLAG_DISABLE_MODIFIERS;
++
+       buffer_gbm =
+         meta_drm_buffer_gbm_new_lock_front (render_device_file,
+                                             onscreen_native->gbm.surface,
+-                                            use_modifiers,
++                                            buffer_flags,
+                                             &error);
+       if (!buffer_gbm)
+         {
+@@ -1490,6 +1506,8 @@
+   MetaEgl *egl = meta_onscreen_native_get_egl (onscreen_native);
+   MetaGpu *gpu;
+   MetaRendererNativeGpuData *renderer_gpu_data;
++  MetaRenderDevice *render_device;
++  EGLDisplay egl_display;
+   EGLint num_modifiers;
+   GArray *modifiers;
+   GError *error = NULL;
+@@ -1498,13 +1516,15 @@
+   gpu = meta_crtc_get_gpu (META_CRTC (crtc_kms));
+   renderer_gpu_data = meta_renderer_native_get_gpu_data (renderer_native,
+                                                          META_GPU_KMS (gpu));
++  render_device = renderer_gpu_data->render_device;
++  egl_display = meta_render_device_get_egl_display (render_device);
+ 
+-  if (!meta_egl_has_extensions (egl, renderer_gpu_data->egl_display, NULL,
++  if (!meta_egl_has_extensions (egl, egl_display, NULL,
+                                 "EGL_EXT_image_dma_buf_import_modifiers",
+                                 NULL))
+     return NULL;
+ 
+-  ret = meta_egl_query_dma_buf_modifiers (egl, renderer_gpu_data->egl_display,
++  ret = meta_egl_query_dma_buf_modifiers (egl, egl_display,
+                                           format, 0, NULL, NULL,
+                                           &num_modifiers, NULL);
+   if (!ret || num_modifiers == 0)
+@@ -1512,7 +1532,7 @@
+ 
+   modifiers = g_array_sized_new (FALSE, FALSE, sizeof (uint64_t),
+                                  num_modifiers);
+-  ret = meta_egl_query_dma_buf_modifiers (egl, renderer_gpu_data->egl_display,
++  ret = meta_egl_query_dma_buf_modifiers (egl, egl_display,
+                                           format, num_modifiers,
+                                           (EGLuint64KHR *) modifiers->data, NULL,
+                                           &num_modifiers, &error);
+@@ -1573,6 +1593,8 @@
+   CoglRenderer *cogl_renderer = cogl_display->renderer;
+   CoglRendererEGL *cogl_renderer_egl = cogl_renderer->winsys;
+   MetaRendererNativeGpuData *renderer_gpu_data = cogl_renderer_egl->platform;
++  MetaRenderDeviceGbm *render_device_gbm;
++  struct gbm_device *gbm_device;
+   struct gbm_surface *new_gbm_surface = NULL;
+   EGLNativeWindowType egl_native_window;
+   EGLSurface new_egl_surface;
+@@ -1582,6 +1604,8 @@
+   renderer_gpu_data =
+     meta_renderer_native_get_gpu_data (renderer_native,
+                                        onscreen_native->render_gpu);
++  render_device_gbm = META_RENDER_DEVICE_GBM (renderer_gpu_data->render_device);
++  gbm_device = meta_render_device_gbm_get_gbm_device (render_device_gbm);
+ 
+   format = get_gbm_format_from_egl (egl,
+                                     cogl_renderer_egl->edpy,
+@@ -1595,7 +1619,7 @@
+   if (modifiers)
+     {
+       new_gbm_surface =
+-        gbm_surface_create_with_modifiers (renderer_gpu_data->gbm.device,
++        gbm_surface_create_with_modifiers (gbm_device,
+                                            width, height, format,
+                                            (uint64_t *) modifiers->data,
+                                            modifiers->len);
+@@ -1609,7 +1633,7 @@
+       if (should_surface_be_sharable (onscreen))
+         flags |= GBM_BO_USE_LINEAR;
+ 
+-      new_gbm_surface = gbm_surface_create (renderer_gpu_data->gbm.device,
++      new_gbm_surface = gbm_surface_create (gbm_device,
+                                             width, height,
+                                             format,
+                                             flags);
+@@ -1660,9 +1684,10 @@
+   CoglRenderer *cogl_renderer = cogl_display->renderer;
+   CoglRendererEGL *cogl_renderer_egl = cogl_renderer->winsys;
+   MetaRendererNativeGpuData *renderer_gpu_data = cogl_renderer_egl->platform;
++  MetaRenderDevice *render_device;
+   MetaEgl *egl =
+     meta_renderer_native_get_egl (renderer_gpu_data->renderer_native);
+-  EGLDisplay egl_display = renderer_gpu_data->egl_display;
++  EGLDisplay egl_display;
+   EGLConfig egl_config;
+   EGLStreamKHR egl_stream;
+   EGLSurface egl_surface;
+@@ -1680,6 +1705,8 @@
+     EGL_NONE
+   };
+ 
++  render_device = renderer_gpu_data->render_device;
++  egl_display = meta_render_device_get_egl_display (render_device);
+   egl_stream = meta_egl_create_stream (egl, egl_display, stream_attribs, error);
+   if (egl_stream == EGL_NO_STREAM_KHR)
+     return FALSE;
+@@ -1755,7 +1782,8 @@
+   int width;
+   int height;
+ #ifdef HAVE_EGL_DEVICE
+-  MetaDeviceFile *render_device_file;
++  MetaRenderDevice *render_device;
++  MetaDrmBuffer *dumb_buffer;
+   EGLStreamKHR egl_stream;
+ #endif
+   CoglFramebufferClass *parent_class;
+@@ -1792,15 +1820,16 @@
+       break;
+ #ifdef HAVE_EGL_DEVICE
+     case META_RENDERER_NATIVE_MODE_EGL_DEVICE:
+-      render_device_file = renderer_gpu_data->device_file;
+-      onscreen_native->egl.dumb_fb =
+-        meta_drm_buffer_dumb_new (render_device_file,
+-                                  width, height,
+-                                  DRM_FORMAT_XRGB8888,
+-                                  error);
+-      if (!onscreen_native->egl.dumb_fb)
++      render_device = renderer_gpu_data->render_device;
++      dumb_buffer = meta_render_device_allocate_dumb_buf (render_device,
++                                                          width, height,
++                                                          DRM_FORMAT_XRGB8888,
++                                                          error);
++      if (!dumb_buffer)
+         return FALSE;
+ 
++      onscreen_native->egl.dumb_fb = META_DRM_BUFFER_DUMB (dumb_buffer);
++
+       if (!create_surfaces_egl_device (onscreen,
+                                        width, height,
+                                        &egl_stream,
+@@ -1827,6 +1856,10 @@
+   CoglFramebuffer *framebuffer = COGL_FRAMEBUFFER (onscreen);
+   MetaOnscreenNative *onscreen_native = META_ONSCREEN_NATIVE (onscreen);
+   MetaEgl *egl = meta_onscreen_native_get_egl (onscreen_native);
++  MetaRenderDevice *render_device;
++  MetaRenderDeviceGbm *render_device_gbm;
++  struct gbm_device *gbm_device;
++  EGLDisplay egl_display;
+   int width, height;
+   EGLNativeWindowType egl_native_window;
+   struct gbm_surface *gbm_surface;
+@@ -1835,13 +1868,17 @@
+   MetaGpuKms *gpu_kms;
+   uint32_t format;
+ 
++  render_device = renderer_gpu_data->render_device;
++  egl_display = meta_render_device_get_egl_display (render_device);
+   width = cogl_framebuffer_get_width (framebuffer);
+   height = cogl_framebuffer_get_height (framebuffer);
+   format = get_gbm_format_from_egl (egl,
+-                                    renderer_gpu_data->egl_display,
++                                    egl_display,
+                                     renderer_gpu_data->secondary.egl_config);
+ 
+-  gbm_surface = gbm_surface_create (renderer_gpu_data->gbm.device,
++  render_device_gbm = META_RENDER_DEVICE_GBM (render_device);
++  gbm_device = meta_render_device_gbm_get_gbm_device (render_device_gbm);
++  gbm_surface = gbm_surface_create (gbm_device,
+                                     width, height,
+                                     format,
+                                     GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+@@ -1855,7 +1892,7 @@
+   egl_native_window = (EGLNativeWindowType) gbm_surface;
+   egl_surface =
+     meta_egl_create_window_surface (egl,
+-                                    renderer_gpu_data->egl_display,
++                                    egl_display,
+                                     renderer_gpu_data->secondary.egl_config,
+                                     egl_native_window,
+                                     NULL,
+@@ -1949,8 +1986,8 @@
+   CoglFramebuffer *framebuffer = COGL_FRAMEBUFFER (onscreen);
+   MetaOnscreenNative *onscreen_native = META_ONSCREEN_NATIVE (onscreen);
+   MetaOnscreenNativeSecondaryGpuState *secondary_gpu_state;
++  MetaRenderDevice *render_device;
+   MetaGpuKms *gpu_kms;
+-  MetaDeviceFile *device_file;
+   int width, height;
+   unsigned int i;
+   uint32_t drm_format;
+@@ -1968,10 +2005,10 @@
+   height = cogl_framebuffer_get_height (framebuffer);
+ 
+   gpu_kms = META_GPU_KMS (meta_crtc_get_gpu (onscreen_native->crtc));
+-  device_file = renderer_gpu_data->device_file;
++  render_device = renderer_gpu_data->render_device;
+   meta_topic (META_DEBUG_KMS,
+               "Secondary GPU %s using DRM format '%s' (0x%x) for a %dx%d output.",
+-              meta_device_file_get_path (device_file),
++              meta_render_device_get_name (render_device),
+               meta_drm_format_to_string (&tmp, drm_format),
+               drm_format,
+               width, height);
+@@ -1983,16 +2020,19 @@
+ 
+   for (i = 0; i < G_N_ELEMENTS (secondary_gpu_state->cpu.dumb_fbs); i++)
+     {
+-      secondary_gpu_state->cpu.dumb_fbs[i] =
+-        meta_drm_buffer_dumb_new (device_file,
+-                                  width, height,
+-                                  drm_format,
+-                                  error);
+-      if (!secondary_gpu_state->cpu.dumb_fbs[i])
++      MetaDrmBuffer *dumb_buffer;
++
++      dumb_buffer = meta_render_device_allocate_dumb_buf (render_device,
++                                                          width, height,
++                                                          drm_format,
++                                                          error);
++      if (!dumb_buffer)
+         {
+           secondary_gpu_state_free (secondary_gpu_state);
+           return FALSE;
+         }
++
++      secondary_gpu_state->cpu.dumb_fbs[i] = META_DRM_BUFFER_DUMB (dumb_buffer);
+     }
+ 
+   /*
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-render-device.c package.new/mutter/src/backends/native/meta-render-device.c
+--- package.orig/mutter/src/backends/native/meta-render-device.c	1969-12-31 20:30:00.000000000 -0330
++++ package.new/mutter/src/backends/native/meta-render-device.c	2021-11-10 10:43:36.375264148 -0330
+@@ -0,0 +1,412 @@
++/*
++ * Copyright (C) 2021 Red Hat Inc.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
++ * 02111-1307, USA.
++ *
++ */
++
++#include "config.h"
++
++#include "backends/native/meta-render-device-private.h"
++
++#include "backends/meta-backend-private.h"
++#include "backends/meta-egl.h"
++#include "backends/native/meta-backend-native-types.h"
++#include "backends/native/meta-drm-buffer-dumb.h"
++
++enum
++{
++  PROP_0,
++
++  PROP_BACKEND,
++  PROP_DEVICE_FILE,
++
++  N_PROPS
++};
++
++static GParamSpec *obj_props[N_PROPS];
++
++typedef struct _MetaRenderDevicePrivate
++{
++  MetaBackend *backend;
++
++  MetaDeviceFile *device_file;
++
++  EGLDisplay egl_display;
++  EGLConfig egl_config;
++
++  gboolean is_hardware_rendering;
++} MetaRenderDevicePrivate;
++
++static void
++initable_iface_init (GInitableIface *initable_iface);
++
++G_DEFINE_ABSTRACT_TYPE_WITH_CODE (MetaRenderDevice, meta_render_device,
++                                  G_TYPE_OBJECT,
++                                  G_ADD_PRIVATE (MetaRenderDevice)
++                                  G_IMPLEMENT_INTERFACE (G_TYPE_INITABLE,
++                                                         initable_iface_init))
++
++static EGLDisplay
++meta_render_device_create_egl_display (MetaRenderDevice  *render_device,
++                                       GError           **error)
++{
++  MetaRenderDeviceClass *klass = META_RENDER_DEVICE_GET_CLASS (render_device);
++
++  return klass->create_egl_display (render_device, error);
++}
++
++static void
++detect_hardware_rendering (MetaRenderDevice *render_device)
++{
++  MetaRenderDevicePrivate *priv =
++    meta_render_device_get_instance_private (render_device);
++  MetaEgl *egl = meta_backend_get_egl (priv->backend);
++  g_autoptr (GError) error = NULL;
++  EGLint *attributes;
++  EGLContext egl_context;
++  const char *renderer_str;
++
++  attributes = (EGLint[]) {
++    EGL_CONTEXT_CLIENT_VERSION, 2,
++    EGL_NONE
++  };
++  egl_context = meta_egl_create_context (egl,
++                                         priv->egl_display,
++                                         EGL_NO_CONFIG_KHR,
++                                         EGL_NO_CONTEXT,
++                                         attributes,
++                                         &error);
++  if (egl_context == EGL_NO_CONTEXT)
++    {
++      meta_topic (META_DEBUG_RENDER, "Failed to create EGLContext for %s: %s",
++                  meta_device_file_get_path (priv->device_file),
++                  error->message);
++      return;
++    }
++
++  if (!meta_egl_make_current (egl,
++                              priv->egl_display,
++                              EGL_NO_SURFACE,
++                              EGL_NO_SURFACE,
++                              egl_context,
++                              &error))
++    {
++      g_warning ("Failed to detect hardware rendering: eglMakeCurrent(): %s",
++                 error->message);
++      goto out_has_context;
++    }
++
++  renderer_str = (const char *) glGetString (GL_RENDERER);
++  if (g_str_has_prefix (renderer_str, "llvmpipe") ||
++      g_str_has_prefix (renderer_str, "softpipe") ||
++      g_str_has_prefix (renderer_str, "swrast"))
++    goto out_has_context;
++
++  priv->is_hardware_rendering = TRUE;
++
++out_has_context:
++  meta_egl_destroy_context (egl, priv->egl_display, egl_context, NULL);
++}
++
++static void
++init_egl (MetaRenderDevice *render_device)
++{
++  MetaRenderDevicePrivate *priv =
++    meta_render_device_get_instance_private (render_device);
++  MetaEgl *egl = meta_backend_get_egl (priv->backend);
++  g_autoptr (GError) error = NULL;
++  EGLDisplay egl_display;
++
++  meta_egl_bind_api (egl, EGL_OPENGL_ES_API, NULL);
++
++  egl_display = meta_render_device_create_egl_display (render_device, &error);
++  if (egl_display == EGL_NO_DISPLAY)
++    {
++      meta_topic (META_DEBUG_RENDER, "Failed to create EGLDisplay for %s: %s",
++                  meta_device_file_get_path (priv->device_file),
++                  error->message);
++      return;
++    }
++
++  priv->egl_display = egl_display;
++  detect_hardware_rendering (render_device);
++}
++
++static gboolean
++meta_render_device_initable_init (GInitable     *initable,
++                                  GCancellable  *cancellable,
++                                  GError       **error)
++{
++  MetaRenderDevice *render_device = META_RENDER_DEVICE (initable);
++
++  init_egl (render_device);
++
++  return TRUE;
++}
++
++static void
++initable_iface_init (GInitableIface *initable_iface)
++{
++  initable_iface->init = meta_render_device_initable_init;
++}
++
++static void
++meta_render_device_get_property (GObject    *object,
++                                 guint       prop_id,
++                                 GValue     *value,
++                                 GParamSpec *pspec)
++{
++  MetaRenderDevice *render_device = META_RENDER_DEVICE (object);
++  MetaRenderDevicePrivate *priv =
++    meta_render_device_get_instance_private (render_device);
++
++  switch (prop_id)
++    {
++    case PROP_BACKEND:
++      g_value_set_object (value, priv->backend);
++      break;
++    case PROP_DEVICE_FILE:
++      g_value_set_pointer (value, priv->device_file);
++      break;
++    default:
++      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++      break;
++    }
++}
++
++static void
++meta_render_device_set_property (GObject      *object,
++                                 guint         prop_id,
++                                 const GValue *value,
++                                 GParamSpec   *pspec)
++{
++  MetaRenderDevice *render_device = META_RENDER_DEVICE (object);
++  MetaRenderDevicePrivate *priv =
++    meta_render_device_get_instance_private (render_device);
++
++  switch (prop_id)
++    {
++    case PROP_BACKEND:
++      priv->backend = g_value_get_object (value);
++      break;
++    case PROP_DEVICE_FILE:
++      priv->device_file = g_value_get_pointer (value);
++      break;
++    default:
++      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++      break;
++    }
++}
++
++static void
++meta_render_device_dispose (GObject *object)
++{
++  MetaRenderDevice *render_device = META_RENDER_DEVICE (object);
++  MetaRenderDevicePrivate *priv =
++    meta_render_device_get_instance_private (render_device);
++  MetaEgl *egl = meta_backend_get_egl (priv->backend);
++
++  if (priv->egl_display != EGL_NO_DISPLAY)
++    {
++      meta_egl_terminate (egl, priv->egl_display, NULL);
++      priv->egl_display = EGL_NO_DISPLAY;
++    }
++
++  G_OBJECT_CLASS (meta_render_device_parent_class)->dispose (object);
++}
++
++static void
++meta_render_device_finalize (GObject *object)
++{
++  MetaRenderDevice *render_device = META_RENDER_DEVICE (object);
++  MetaRenderDevicePrivate *priv =
++    meta_render_device_get_instance_private (render_device);
++
++  g_clear_pointer (&priv->device_file, meta_device_file_release);
++
++  G_OBJECT_CLASS (meta_render_device_parent_class)->finalize (object);
++}
++
++static void
++meta_render_device_constructed (GObject *object)
++{
++  MetaRenderDevice *render_device = META_RENDER_DEVICE (object);
++  MetaRenderDevicePrivate *priv =
++    meta_render_device_get_instance_private (render_device);
++
++  if (priv->device_file)
++    meta_device_file_acquire (priv->device_file);
++
++  G_OBJECT_CLASS (meta_render_device_parent_class)->constructed (object);
++}
++
++static void
++meta_render_device_class_init (MetaRenderDeviceClass *klass)
++{
++  GObjectClass *object_class = G_OBJECT_CLASS (klass);
++
++  object_class->get_property = meta_render_device_get_property;
++  object_class->set_property = meta_render_device_set_property;
++  object_class->constructed = meta_render_device_constructed;
++  object_class->dispose = meta_render_device_dispose;
++  object_class->finalize = meta_render_device_finalize;
++
++  obj_props[PROP_BACKEND] =
++    g_param_spec_object ("backend",
++                         "backend",
++                         "MetaBackend",
++                         META_TYPE_BACKEND,
++                         G_PARAM_READWRITE |
++                         G_PARAM_CONSTRUCT_ONLY |
++                         G_PARAM_STATIC_STRINGS);
++  obj_props[PROP_DEVICE_FILE] =
++    g_param_spec_pointer ("device-file",
++                          "device file",
++                          "MetaDeviceFile",
++                          G_PARAM_READWRITE |
++                          G_PARAM_CONSTRUCT_ONLY |
++                          G_PARAM_STATIC_STRINGS);
++  g_object_class_install_properties (object_class, N_PROPS, obj_props);
++}
++
++static void
++meta_render_device_init (MetaRenderDevice *render_device)
++{
++  MetaRenderDevicePrivate *priv =
++    meta_render_device_get_instance_private (render_device);
++
++  priv->egl_display = EGL_NO_DISPLAY;
++  priv->egl_config = EGL_NO_CONFIG_KHR;
++}
++
++MetaBackend *
++meta_render_device_get_backend (MetaRenderDevice *render_device)
++{
++  MetaRenderDevicePrivate *priv =
++    meta_render_device_get_instance_private (render_device);
++
++  return priv->backend;
++}
++
++MetaDeviceFile *
++meta_render_device_get_device_file (MetaRenderDevice *render_device)
++{
++  MetaRenderDevicePrivate *priv =
++    meta_render_device_get_instance_private (render_device);
++
++  return priv->device_file;
++}
++
++EGLDisplay
++meta_render_device_get_egl_display (MetaRenderDevice *render_device)
++{
++  MetaRenderDevicePrivate *priv =
++    meta_render_device_get_instance_private (render_device);
++
++  return priv->egl_display;
++}
++
++gboolean
++meta_render_device_is_hardware_accelerated (MetaRenderDevice *render_device)
++{
++  MetaRenderDevicePrivate *priv =
++    meta_render_device_get_instance_private (render_device);
++
++  return priv->is_hardware_rendering;
++}
++
++const char *
++meta_render_device_get_name (MetaRenderDevice *render_device)
++{
++  MetaRenderDevicePrivate *priv =
++    meta_render_device_get_instance_private (render_device);
++
++  if (priv->device_file)
++    return meta_device_file_get_path (priv->device_file);
++  else
++    return "(device-less)";
++}
++
++MetaDrmBuffer *
++meta_render_device_allocate_dma_buf (MetaRenderDevice    *render_device,
++                                     int                  width,
++                                     int                  height,
++                                     uint32_t             format,
++                                     MetaDrmBufferFlags   flags,
++                                     GError             **error)
++{
++  MetaRenderDeviceClass *klass = META_RENDER_DEVICE_GET_CLASS (render_device);
++
++  if (klass->allocate_dma_buf)
++    {
++      return klass->allocate_dma_buf (render_device,
++                                      width, height, format,
++                                      flags,
++                                      error);
++    }
++
++  g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
++               "Render device '%s' doesn't support allocating DMA buffers",
++               meta_render_device_get_name (render_device));
++
++  return NULL;
++}
++
++MetaDrmBuffer *
++meta_render_device_import_dma_buf (MetaRenderDevice  *render_device,
++                                   MetaDrmBuffer     *buffer,
++                                   GError           **error)
++{
++  MetaRenderDeviceClass *klass = META_RENDER_DEVICE_GET_CLASS (render_device);
++
++  if (klass->import_dma_buf)
++    return klass->import_dma_buf (render_device, buffer, error);
++
++  g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
++               "Render device '%s' doesn't importing DMA buffers",
++               meta_render_device_get_name (render_device));
++
++  return NULL;
++}
++
++MetaDrmBuffer *
++meta_render_device_allocate_dumb_buf (MetaRenderDevice  *render_device,
++                                      int                width,
++                                      int                height,
++                                      uint32_t           format,
++                                      GError           **error)
++{
++  MetaRenderDevicePrivate *priv =
++    meta_render_device_get_instance_private (render_device);
++  MetaDrmBufferDumb *buffer_dumb;
++
++  if (!priv->device_file)
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
++                   "No device file to allocate from");
++      return NULL;
++    }
++
++  buffer_dumb = meta_drm_buffer_dumb_new (priv->device_file,
++                                          width, height,
++                                          format,
++                                          error);
++  if (!buffer_dumb)
++    return NULL;
++
++  return META_DRM_BUFFER (buffer_dumb);
++}
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-render-device-egl-stream.c package.new/mutter/src/backends/native/meta-render-device-egl-stream.c
+--- package.orig/mutter/src/backends/native/meta-render-device-egl-stream.c	1969-12-31 20:30:00.000000000 -0330
++++ package.new/mutter/src/backends/native/meta-render-device-egl-stream.c	2021-11-10 10:42:23.250967425 -0330
+@@ -0,0 +1,286 @@
++/*
++ * Copyright (C) 2016-2021 Red Hat Inc.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
++ * 02111-1307, USA.
++ *
++ */
++
++#include "config.h"
++
++#include "backends/native/meta-render-device-egl-stream.h"
++
++#include "backends/meta-backend-private.h"
++
++struct _MetaRenderDeviceEglStream
++{
++  MetaRenderDevice parent;
++
++  EGLDeviceEXT egl_device;
++};
++
++static GInitableIface *initable_parent_iface;
++
++static void
++initable_iface_init (GInitableIface *initable_iface);
++
++G_DEFINE_TYPE_WITH_CODE (MetaRenderDeviceEglStream, meta_render_device_egl_stream,
++                         META_TYPE_RENDER_DEVICE,
++                         G_IMPLEMENT_INTERFACE (G_TYPE_INITABLE,
++                                                initable_iface_init))
++
++static EGLDisplay
++get_egl_device_display (MetaRenderDevice  *render_device,
++                        EGLDeviceEXT       egl_device,
++                        GError           **error)
++{
++  MetaBackend *backend = meta_render_device_get_backend (render_device);
++  MetaEgl *egl = meta_backend_get_egl (backend);
++  MetaDeviceFile *device_file =
++    meta_render_device_get_device_file (render_device);
++  int kms_fd = meta_device_file_get_fd (device_file);
++  EGLint platform_attribs[] = {
++    EGL_DRM_MASTER_FD_EXT, kms_fd,
++    EGL_NONE
++  };
++
++  return meta_egl_get_platform_display (egl, EGL_PLATFORM_DEVICE_EXT,
++                                        (void *) egl_device,
++                                        platform_attribs,
++                                        error);
++}
++
++static int
++count_mode_setting_devices (MetaBackend *backend)
++{
++  return g_list_length (meta_backend_get_gpus (backend));
++}
++
++static const char *
++get_drm_device_file (MetaEgl     *egl,
++                     EGLDeviceEXT device,
++                     GError     **error)
++{
++  if (!meta_egl_egl_device_has_extensions (egl, device,
++                                           NULL,
++                                           "EGL_EXT_device_drm",
++                                           NULL))
++    {
++      g_set_error (error, G_IO_ERROR,
++                   G_IO_ERROR_FAILED,
++                   "Missing required EGLDevice extension EGL_EXT_device_drm");
++      return NULL;
++    }
++
++  return meta_egl_query_device_string (egl, device,
++                                       EGL_DRM_DEVICE_FILE_EXT,
++                                       error);
++}
++
++static EGLDeviceEXT
++find_egl_device (MetaRenderDevice  *render_device,
++                 GError           **error)
++{
++  MetaBackend *backend = meta_render_device_get_backend (render_device);
++  MetaEgl *egl = meta_backend_get_egl (backend);
++  g_autofree const char **missing_extensions = NULL;
++  MetaDeviceFile *device_file =
++    meta_render_device_get_device_file (render_device);
++  EGLint num_devices;
++  g_autofree EGLDeviceEXT *devices = NULL;
++  const char *device_file_path;
++  EGLDeviceEXT device;
++  EGLint i;
++
++  if (!meta_egl_has_extensions (egl,
++                                EGL_NO_DISPLAY,
++                                &missing_extensions,
++                                "EGL_EXT_device_base",
++                                NULL))
++    {
++      g_autofree char *missing_extensions_str = NULL;
++
++      missing_extensions_str = g_strjoinv (", ", (char **) missing_extensions);
++      g_set_error (error, G_IO_ERROR,
++                   G_IO_ERROR_FAILED,
++                   "Missing EGL extensions required for EGLDevice renderer: %s",
++                   missing_extensions_str);
++      return EGL_NO_DEVICE_EXT;
++    }
++
++  if (!meta_egl_query_devices (egl, 0, NULL, &num_devices, error))
++    return EGL_NO_DEVICE_EXT;
++
++  devices = g_new0 (EGLDeviceEXT, num_devices);
++  if (!meta_egl_query_devices (egl, num_devices, devices, &num_devices,
++                               error))
++    return EGL_NO_DEVICE_EXT;
++
++  device_file_path = meta_device_file_get_path (device_file);
++
++  device = EGL_NO_DEVICE_EXT;
++  for (i = 0; i < num_devices; i++)
++    {
++      const char *egl_device_drm_path;
++
++      g_clear_error (error);
++
++      egl_device_drm_path = get_drm_device_file (egl, devices[i], error);
++      if (!egl_device_drm_path)
++        continue;
++
++      if (g_str_equal (egl_device_drm_path, device_file_path))
++        {
++          device = devices[i];
++          break;
++        }
++    }
++
++  if (device == EGL_NO_DEVICE_EXT)
++    {
++      if (!*error)
++        g_set_error (error, G_IO_ERROR,
++                     G_IO_ERROR_FAILED,
++                     "Failed to find matching EGLDeviceEXT");
++      return EGL_NO_DEVICE_EXT;
++    }
++
++  return device;
++}
++
++static gboolean
++meta_render_device_egl_stream_initable_init (GInitable     *initable,
++                                             GCancellable  *cancellable,
++                                             GError       **error)
++{
++  MetaRenderDevice *render_device = META_RENDER_DEVICE (initable);
++  MetaRenderDeviceEglStream *render_device_egl_stream =
++    META_RENDER_DEVICE_EGL_STREAM (initable);
++  MetaBackend *backend = meta_render_device_get_backend (render_device);
++  EGLDeviceEXT egl_device;
++  EGLDisplay egl_display;
++  g_autofree const char **missing_extensions = NULL;
++
++  if (count_mode_setting_devices (backend) != 1)
++    {
++      g_set_error (error, G_IO_ERROR,
++                   G_IO_ERROR_FAILED,
++                   "EGLDevice currently only works with single GPU systems");
++      return FALSE;
++    }
++
++  egl_device = find_egl_device (render_device, error);
++  if (egl_device == EGL_NO_DEVICE_EXT)
++    return FALSE;
++
++  render_device_egl_stream->egl_device = egl_device;
++
++  if (!initable_parent_iface->init (initable, cancellable, error))
++    return FALSE;
++
++  egl_display = meta_render_device_get_egl_display (render_device);
++  if (egl_display == EGL_NO_DISPLAY)
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
++                   "EGLStream render device requires an EGL display");
++      return FALSE;
++    }
++
++  return TRUE;
++}
++
++static void
++initable_iface_init (GInitableIface *initable_iface)
++{
++  initable_parent_iface = g_type_interface_peek_parent (initable_iface);
++
++  initable_iface->init = meta_render_device_egl_stream_initable_init;
++}
++
++static EGLDisplay
++meta_render_device_egl_stream_create_egl_display (MetaRenderDevice  *render_device,
++                                                  GError           **error)
++{
++  MetaRenderDeviceEglStream *render_device_egl_stream =
++    META_RENDER_DEVICE_EGL_STREAM (render_device);
++  EGLDeviceEXT egl_device = render_device_egl_stream->egl_device;
++  MetaBackend *backend = meta_render_device_get_backend (render_device);
++  MetaEgl *egl = meta_backend_get_egl (backend);
++  EGLDisplay egl_display;
++  g_autofree const char **missing_extensions = NULL;
++
++  egl_display = get_egl_device_display (render_device, egl_device, error);
++  if (egl_display == EGL_NO_DISPLAY)
++    return EGL_NO_DISPLAY;
++
++  if (!meta_egl_initialize (egl, egl_display, error))
++    {
++      meta_egl_terminate (egl, egl_display, NULL);
++      return EGL_NO_DISPLAY;
++    }
++
++  if (!meta_egl_has_extensions (egl,
++                                egl_display,
++                                &missing_extensions,
++                                "EGL_NV_output_drm_flip_event",
++                                "EGL_EXT_output_base",
++                                "EGL_EXT_output_drm",
++                                "EGL_KHR_stream",
++                                "EGL_KHR_stream_producer_eglsurface",
++                                "EGL_EXT_stream_consumer_egloutput",
++                                "EGL_EXT_stream_acquire_mode",
++                                NULL))
++    {
++      g_autofree char *missing_extensions_str = NULL;
++
++      meta_egl_terminate (egl, egl_display, NULL);
++
++      missing_extensions_str = g_strjoinv (", ", (char **) missing_extensions);
++      g_set_error (error, G_IO_ERROR,
++                   G_IO_ERROR_FAILED,
++                   "Missing EGL extensions required for EGLDevice renderer: %s",
++                   missing_extensions_str);
++      meta_egl_terminate (egl, egl_display, NULL);
++      return EGL_NO_DISPLAY;
++    }
++
++  return egl_display;
++}
++
++static void
++meta_render_device_egl_stream_class_init (MetaRenderDeviceEglStreamClass *klass)
++{
++  MetaRenderDeviceClass *render_device_class = META_RENDER_DEVICE_CLASS (klass);
++
++  render_device_class->create_egl_display =
++    meta_render_device_egl_stream_create_egl_display;
++}
++
++static void
++meta_render_device_egl_stream_init (MetaRenderDeviceEglStream *render_device_egl_stream)
++{
++}
++
++MetaRenderDeviceEglStream *
++meta_render_device_egl_stream_new (MetaBackend     *backend,
++                                   MetaDeviceFile  *device_file,
++                                   GError         **error)
++{
++  return g_initable_new (META_TYPE_RENDER_DEVICE_EGL_STREAM,
++                         NULL, error,
++                         "backend", backend,
++                         "device-file", device_file,
++                         NULL);
++}
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-render-device-egl-stream.h package.new/mutter/src/backends/native/meta-render-device-egl-stream.h
+--- package.orig/mutter/src/backends/native/meta-render-device-egl-stream.h	1969-12-31 20:30:00.000000000 -0330
++++ package.new/mutter/src/backends/native/meta-render-device-egl-stream.h	2021-11-10 10:42:23.250967425 -0330
+@@ -0,0 +1,35 @@
++/*
++ * Copyright (C) 2021 Red Hat Inc.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
++ * 02111-1307, USA.
++ *
++ */
++
++#ifndef META_RENDER_DEVICE_EGL_STREAM_H
++#define META_RENDER_DEVICE_EGL_STREAM_H
++
++#include "backends/native/meta-render-device-private.h"
++
++#define META_TYPE_RENDER_DEVICE_EGL_STREAM (meta_render_device_egl_stream_get_type ())
++G_DECLARE_FINAL_TYPE (MetaRenderDeviceEglStream, meta_render_device_egl_stream,
++                      META, RENDER_DEVICE_EGL_STREAM,
++                      MetaRenderDevice)
++
++MetaRenderDeviceEglStream * meta_render_device_egl_stream_new (MetaBackend     *backend,
++                                                               MetaDeviceFile  *device_file,
++                                                               GError         **error);
++
++#endif /* META_RENDER_DEVICE_EGL_STREAM_H */
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-render-device-gbm.c package.new/mutter/src/backends/native/meta-render-device-gbm.c
+--- package.orig/mutter/src/backends/native/meta-render-device-gbm.c	1969-12-31 20:30:00.000000000 -0330
++++ package.new/mutter/src/backends/native/meta-render-device-gbm.c	2021-11-10 10:43:29.678231967 -0330
+@@ -0,0 +1,227 @@
++/*
++ * Copyright (C) 2016-2021 Red Hat Inc.
++ * Copyright (c) 2018-2019 DisplayLink (UK) Ltd.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
++ * 02111-1307, USA.
++ *
++ */
++
++#include "config.h"
++
++#include "backends/native/meta-render-device-gbm.h"
++
++#include <gbm.h>
++
++#include "backends/meta-backend-private.h"
++#include "backends/native/meta-drm-buffer-gbm.h"
++#include "backends/native/meta-drm-buffer-import.h"
++
++struct _MetaRenderDeviceGbm
++{
++  MetaRenderDevice parent;
++
++  struct gbm_device *gbm_device;
++};
++
++static GInitableIface *initable_parent_iface;
++
++static void
++initable_iface_init (GInitableIface *initable_iface);
++
++G_DEFINE_TYPE_WITH_CODE (MetaRenderDeviceGbm, meta_render_device_gbm,
++                         META_TYPE_RENDER_DEVICE,
++                         G_IMPLEMENT_INTERFACE (G_TYPE_INITABLE,
++                                                initable_iface_init))
++
++static gboolean
++meta_render_device_gbm_initable_init (GInitable     *initable,
++                                      GCancellable  *cancellable,
++                                      GError       **error)
++{
++  MetaRenderDevice *render_device = META_RENDER_DEVICE (initable);
++  MetaRenderDeviceGbm *render_device_gbm = META_RENDER_DEVICE_GBM (initable);
++  MetaDeviceFile *device_file =
++    meta_render_device_get_device_file (render_device);
++  struct gbm_device *gbm_device;
++
++  gbm_device = gbm_create_device (meta_device_file_get_fd (device_file));
++  if (!gbm_device)
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
++                   "Failed to create gbm device: %s", g_strerror (errno));
++      return FALSE;
++    }
++
++  render_device_gbm->gbm_device = gbm_device;
++
++  return initable_parent_iface->init (initable, cancellable, error);
++}
++
++static void
++initable_iface_init (GInitableIface *initable_iface)
++{
++  initable_parent_iface = g_type_interface_peek_parent (initable_iface);
++
++  initable_iface->init = meta_render_device_gbm_initable_init;
++}
++
++static MetaDrmBuffer *
++meta_render_device_gbm_import_dma_buf (MetaRenderDevice  *render_device,
++                                       MetaDrmBuffer     *buffer,
++                                       GError           **error)
++{
++  MetaRenderDeviceGbm *render_device_gbm =
++    META_RENDER_DEVICE_GBM (render_device);
++  MetaDeviceFile *device_file;
++  MetaDrmBufferGbm *buffer_gbm;
++  MetaDrmBufferImport *buffer_import;
++
++  if (!META_IS_DRM_BUFFER_GBM (buffer))
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
++                   "Can only import gbm backed DMA buffers");
++      return NULL;
++    }
++
++  device_file = meta_render_device_get_device_file (render_device);
++  buffer_gbm = META_DRM_BUFFER_GBM (buffer);
++  buffer_import = meta_drm_buffer_import_new (device_file,
++                                              render_device_gbm->gbm_device,
++                                              buffer_gbm,
++                                              error);
++  if (!buffer_import)
++    return NULL;
++
++  return META_DRM_BUFFER (buffer_import);
++}
++
++static EGLDisplay
++meta_render_device_gbm_create_egl_display (MetaRenderDevice  *render_device,
++                                           GError           **error)
++{
++  MetaRenderDeviceGbm *render_device_gbm =
++    META_RENDER_DEVICE_GBM (render_device);
++  MetaBackend *backend = meta_render_device_get_backend (render_device);
++  MetaEgl *egl = meta_backend_get_egl (backend);
++  EGLDisplay egl_display;
++
++  if (!meta_egl_has_extensions (egl, EGL_NO_DISPLAY, NULL,
++                                "EGL_MESA_platform_gbm",
++                                NULL) &&
++      !meta_egl_has_extensions (egl, EGL_NO_DISPLAY, NULL,
++                                "EGL_KHR_platform_gbm",
++                                NULL))
++    {
++      g_set_error (error, G_IO_ERROR,
++                   G_IO_ERROR_FAILED,
++                   "Missing extension for GBM renderer: EGL_KHR_platform_gbm");
++      return EGL_NO_DISPLAY;
++    }
++
++  egl_display = meta_egl_get_platform_display (egl,
++                                               EGL_PLATFORM_GBM_KHR,
++                                               render_device_gbm->gbm_device,
++                                               NULL, error);
++  if (egl_display == EGL_NO_DISPLAY)
++    return EGL_NO_DISPLAY;
++
++  if (!meta_egl_initialize (egl, egl_display, error))
++    {
++      meta_egl_terminate (egl, egl_display, NULL);
++      return EGL_NO_DISPLAY;
++    }
++
++  return egl_display;
++}
++
++static MetaDrmBuffer *
++meta_render_device_gbm_allocate_dma_buf (MetaRenderDevice    *render_device,
++                                         int                  width,
++                                         int                  height,
++                                         uint32_t             format,
++                                         MetaDrmBufferFlags   flags,
++                                         GError             **error)
++{
++  MetaRenderDeviceGbm *render_device_gbm =
++    META_RENDER_DEVICE_GBM (render_device);
++  MetaDeviceFile *device_file;
++  struct gbm_bo *gbm_bo;
++  MetaDrmBufferGbm *buffer_gbm;
++
++  gbm_bo = gbm_bo_create (render_device_gbm->gbm_device,
++                          width, height, format,
++                          GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
++  if (!gbm_bo)
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
++                   "Failed to gbm_bo: %s", g_strerror (errno));
++      return NULL;
++    }
++
++  device_file = meta_render_device_get_device_file (render_device);
++  buffer_gbm = meta_drm_buffer_gbm_new_take (device_file, gbm_bo, flags,
++                                             error);
++  return META_DRM_BUFFER (buffer_gbm);
++}
++
++static void
++meta_render_device_gbm_finalize (GObject *object)
++{
++  MetaRenderDeviceGbm *render_device_gbm = META_RENDER_DEVICE_GBM (object);
++
++  g_clear_pointer (&render_device_gbm->gbm_device, gbm_device_destroy);
++
++  G_OBJECT_CLASS (meta_render_device_gbm_parent_class)->finalize (object);
++}
++
++static void
++meta_render_device_gbm_class_init (MetaRenderDeviceGbmClass *klass)
++{
++  GObjectClass *object_class = G_OBJECT_CLASS (klass);
++  MetaRenderDeviceClass *render_device_class = META_RENDER_DEVICE_CLASS (klass);
++
++  object_class->finalize = meta_render_device_gbm_finalize;
++
++  render_device_class->create_egl_display =
++    meta_render_device_gbm_create_egl_display;
++  render_device_class->allocate_dma_buf =
++    meta_render_device_gbm_allocate_dma_buf;
++  render_device_class->import_dma_buf =
++    meta_render_device_gbm_import_dma_buf;
++}
++
++static void
++meta_render_device_gbm_init (MetaRenderDeviceGbm *render_device_gbm)
++{
++}
++
++MetaRenderDeviceGbm *
++meta_render_device_gbm_new (MetaBackend     *backend,
++                            MetaDeviceFile  *device_file,
++                            GError         **error)
++{
++  return g_initable_new (META_TYPE_RENDER_DEVICE_GBM,
++                         NULL, error,
++                         "backend", backend,
++                         "device-file", device_file,
++                         NULL);
++}
++
++struct gbm_device *
++meta_render_device_gbm_get_gbm_device (MetaRenderDeviceGbm *render_device_gbm)
++{
++  return render_device_gbm->gbm_device;
++}
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-render-device-gbm.h package.new/mutter/src/backends/native/meta-render-device-gbm.h
+--- package.orig/mutter/src/backends/native/meta-render-device-gbm.h	1969-12-31 20:30:00.000000000 -0330
++++ package.new/mutter/src/backends/native/meta-render-device-gbm.h	2021-11-10 10:43:16.898173251 -0330
+@@ -0,0 +1,37 @@
++/*
++ * Copyright (C) 2021 Red Hat Inc.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
++ * 02111-1307, USA.
++ *
++ */
++
++#ifndef META_RENDER_DEVICE_GBM_H
++#define META_RENDER_DEVICE_GBM_H
++
++#include "backends/native/meta-render-device-private.h"
++
++#define META_TYPE_RENDER_DEVICE_GBM (meta_render_device_gbm_get_type ())
++G_DECLARE_FINAL_TYPE (MetaRenderDeviceGbm, meta_render_device_gbm,
++                      META, RENDER_DEVICE_GBM,
++                      MetaRenderDevice)
++
++MetaRenderDeviceGbm * meta_render_device_gbm_new (MetaBackend     *backend,
++                                                  MetaDeviceFile  *device_file,
++                                                  GError         **error);
++
++struct gbm_device * meta_render_device_gbm_get_gbm_device (MetaRenderDeviceGbm *render_device_gbm);
++
++#endif /* META_RENDER_DEVICE_GBM_H */
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-render-device.h package.new/mutter/src/backends/native/meta-render-device.h
+--- package.orig/mutter/src/backends/native/meta-render-device.h	1969-12-31 20:30:00.000000000 -0330
++++ package.new/mutter/src/backends/native/meta-render-device.h	2021-11-10 10:43:36.375264148 -0330
+@@ -0,0 +1,61 @@
++/*
++ * Copyright (C) 2021 Red Hat Inc.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
++ * 02111-1307, USA.
++ *
++ */
++
++#ifndef META_RENDER_DEVICE_H
++#define META_RENDER_DEVICE_H
++
++#include <glib-object.h>
++
++#include "backends/meta-backend-types.h"
++#include "backends/native/meta-backend-native-types.h"
++
++#define META_TYPE_RENDER_DEVICE (meta_render_device_get_type ())
++G_DECLARE_DERIVABLE_TYPE (MetaRenderDevice, meta_render_device,
++                          META, RENDER_DEVICE,
++                          GObject)
++
++MetaBackend * meta_render_device_get_backend (MetaRenderDevice *render_device);
++
++EGLDisplay meta_render_device_get_egl_display (MetaRenderDevice *render_device);
++
++const char * meta_render_device_get_name (MetaRenderDevice *render_device);
++
++gboolean meta_render_device_is_hardware_accelerated (MetaRenderDevice *render_device);
++
++MetaDeviceFile * meta_render_device_get_device_file (MetaRenderDevice *render_device);
++
++MetaDrmBuffer * meta_render_device_allocate_dma_buf (MetaRenderDevice    *render_device,
++                                                     int                  width,
++                                                     int                  height,
++                                                     uint32_t             format,
++                                                     MetaDrmBufferFlags   flags,
++                                                     GError             **error);
++
++MetaDrmBuffer * meta_render_device_import_dma_buf (MetaRenderDevice  *render_device,
++                                                   MetaDrmBuffer     *buffer,
++                                                   GError           **error);
++
++MetaDrmBuffer * meta_render_device_allocate_dumb_buf (MetaRenderDevice  *render_device,
++                                                      int                width,
++                                                      int                height,
++                                                      uint32_t           format,
++                                                      GError           **error);
++
++#endif /* META_RENDER_DEVICE_H */
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-render-device-private.h package.new/mutter/src/backends/native/meta-render-device-private.h
+--- package.orig/mutter/src/backends/native/meta-render-device-private.h	1969-12-31 20:30:00.000000000 -0330
++++ package.new/mutter/src/backends/native/meta-render-device-private.h	2021-11-10 10:43:29.678231967 -0330
+@@ -0,0 +1,50 @@
++/*
++ * Copyright (C) 2021 Red Hat Inc.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
++ * 02111-1307, USA.
++ *
++ */
++
++#ifndef META_RENDER_DEVICE_PRIVATE_H
++#define META_RENDER_DEVICE_PRIVATE_H
++
++#include <gio/gio.h>
++#include <glib-object.h>
++
++#include "backends/meta-egl.h"
++#include "backends/native/meta-device-pool.h"
++#include "backends/native/meta-drm-buffer.h"
++#include "backends/native/meta-render-device.h"
++
++struct _MetaRenderDeviceClass
++{
++  GObjectClass parent_class;
++
++  EGLDisplay (* create_egl_display) (MetaRenderDevice  *render_device,
++                                     GError           **error);
++
++  MetaDrmBuffer * (* allocate_dma_buf) (MetaRenderDevice    *render_device,
++                                        int                  width,
++                                        int                  height,
++                                        uint32_t             format,
++                                        MetaDrmBufferFlags   flags,
++                                        GError             **error);
++  MetaDrmBuffer * (* import_dma_buf) (MetaRenderDevice  *render_device,
++                                      MetaDrmBuffer     *buffer,
++                                      GError           **error);
++};
++
++#endif /* META_RENDER_DEVICE_PRIVATE_H */
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-render-device-surfaceless.c package.new/mutter/src/backends/native/meta-render-device-surfaceless.c
+--- package.orig/mutter/src/backends/native/meta-render-device-surfaceless.c	1969-12-31 20:30:00.000000000 -0330
++++ package.new/mutter/src/backends/native/meta-render-device-surfaceless.c	2021-11-10 10:42:23.250967425 -0330
+@@ -0,0 +1,92 @@
++/*
++ * Copyright (C) 2020-2021 Red Hat Inc.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
++ * 02111-1307, USA.
++ *
++ */
++
++#include "config.h"
++
++#include "backends/native/meta-render-device-surfaceless.h"
++
++#include "backends/meta-backend-private.h"
++#include "backends/meta-egl.h"
++
++struct _MetaRenderDeviceSurfaceless
++{
++  MetaRenderDevice parent;
++};
++
++G_DEFINE_TYPE (MetaRenderDeviceSurfaceless, meta_render_device_surfaceless,
++               META_TYPE_RENDER_DEVICE)
++
++static EGLDisplay
++meta_render_device_surfaceless_create_egl_display (MetaRenderDevice  *render_device,
++                                                   GError           **error)
++{
++  MetaBackend *backend = meta_render_device_get_backend (render_device);
++  MetaEgl *egl = meta_backend_get_egl (backend);
++  EGLDisplay egl_display;
++
++  if (!meta_egl_has_extensions (egl, EGL_NO_DISPLAY, NULL,
++                                "EGL_MESA_platform_surfaceless",
++                                NULL))
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
++                   "Missing EGL platform required for surfaceless context: "
++                   "EGL_MESA_platform_surfaceless");
++      return EGL_NO_DISPLAY;
++    }
++
++  egl_display = meta_egl_get_platform_display (egl,
++                                               EGL_PLATFORM_SURFACELESS_MESA,
++                                               EGL_DEFAULT_DISPLAY,
++                                               NULL, error);
++  if (egl_display == EGL_NO_DISPLAY)
++    return EGL_NO_DISPLAY;
++
++  if (!meta_egl_initialize (egl, egl_display, error))
++    {
++      meta_egl_terminate (egl, egl_display, NULL);
++      return EGL_NO_DISPLAY;
++    }
++
++  return egl_display;
++}
++
++static void
++meta_render_device_surfaceless_class_init (MetaRenderDeviceSurfacelessClass *klass)
++{
++  MetaRenderDeviceClass *render_device_class = META_RENDER_DEVICE_CLASS (klass);
++
++  render_device_class->create_egl_display =
++    meta_render_device_surfaceless_create_egl_display;
++}
++
++static void
++meta_render_device_surfaceless_init (MetaRenderDeviceSurfaceless *render_device_surfaceless)
++{
++}
++
++MetaRenderDeviceSurfaceless *
++meta_render_device_surfaceless_new (MetaBackend  *backend,
++                                    GError      **error)
++{
++  return g_initable_new (META_TYPE_RENDER_DEVICE_SURFACELESS,
++                         NULL, error,
++                         "backend", backend,
++                         NULL);
++}
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-render-device-surfaceless.h package.new/mutter/src/backends/native/meta-render-device-surfaceless.h
+--- package.orig/mutter/src/backends/native/meta-render-device-surfaceless.h	1969-12-31 20:30:00.000000000 -0330
++++ package.new/mutter/src/backends/native/meta-render-device-surfaceless.h	2021-11-10 10:42:23.250967425 -0330
+@@ -0,0 +1,34 @@
++/*
++ * Copyright (C) 2021 Red Hat Inc.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
++ * 02111-1307, USA.
++ *
++ */
++
++#ifndef META_RENDER_DEVICE_SURFACELESS_H
++#define META_RENDER_DEVICE_SURFACELESS_H
++
++#include "backends/native/meta-render-device-private.h"
++
++#define META_TYPE_RENDER_DEVICE_SURFACELESS (meta_render_device_surfaceless_get_type ())
++G_DECLARE_FINAL_TYPE (MetaRenderDeviceSurfaceless, meta_render_device_surfaceless,
++                      META, RENDER_DEVICE_SURFACELESS,
++                      MetaRenderDevice)
++
++MetaRenderDeviceSurfaceless * meta_render_device_surfaceless_new (MetaBackend  *backend,
++                                                                  GError      **error);
++
++#endif /* META_RENDER_DEVICE_SURFACELESS_H */
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-renderer-native.c package.new/mutter/src/backends/native/meta-renderer-native.c
+--- package.orig/mutter/src/backends/native/meta-renderer-native.c	2021-11-10 10:39:31.524825996 -0330
++++ package.new/mutter/src/backends/native/meta-renderer-native.c	2021-11-10 10:44:04.420409185 -0330
+@@ -56,10 +56,16 @@
+ #include "backends/native/meta-kms-device.h"
+ #include "backends/native/meta-kms.h"
+ #include "backends/native/meta-onscreen-native.h"
++#include "backends/native/meta-render-device-gbm.h"
++#include "backends/native/meta-render-device-surfaceless.h"
+ #include "backends/native/meta-renderer-native-private.h"
+ #include "cogl/cogl.h"
+ #include "core/boxes-private.h"
+ 
++#ifdef HAVE_EGL_DEVICE
++#include "backends/native/meta-render-device-egl-stream.h"
++#endif
++
+ #ifndef EGL_DRM_MASTER_FD_EXT
+ #define EGL_DRM_MASTER_FD_EXT 0x333C
+ #endif
+@@ -119,22 +125,21 @@
+ static void
+ meta_renderer_native_gpu_data_free (MetaRendererNativeGpuData *renderer_gpu_data)
+ {
+-  MetaRendererNative *renderer_native = renderer_gpu_data->renderer_native;
+-  MetaEgl *egl = meta_renderer_native_get_egl (renderer_native);
+-
+   if (renderer_gpu_data->secondary.egl_context != EGL_NO_CONTEXT)
+     {
++      MetaRenderDevice *render_device = renderer_gpu_data->render_device;
++      EGLDisplay egl_display =
++        meta_render_device_get_egl_display (render_device);
++      MetaRendererNative *renderer_native = renderer_gpu_data->renderer_native;
++      MetaEgl *egl = meta_renderer_native_get_egl (renderer_native);
++
+       meta_egl_destroy_context (egl,
+-                                renderer_gpu_data->egl_display,
++                                egl_display,
+                                 renderer_gpu_data->secondary.egl_context,
+                                 NULL);
+     }
+ 
+-  if (renderer_gpu_data->egl_display != EGL_NO_DISPLAY)
+-    meta_egl_terminate (egl, renderer_gpu_data->egl_display, NULL);
+-
+-  g_clear_pointer (&renderer_gpu_data->gbm.device, gbm_device_destroy);
+-  g_clear_pointer (&renderer_gpu_data->device_file, meta_device_file_release);
++  g_clear_pointer (&renderer_gpu_data->render_device, g_object_unref);
+   g_free (renderer_gpu_data);
+ }
+ 
+@@ -158,11 +163,18 @@
+ {
+   MetaRendererNative *renderer_native = meta_renderer_native_from_gpu (gpu_kms);
+   MetaRendererNativeGpuData *renderer_gpu_data;
++  MetaRenderDevice *render_device;
++  MetaRenderDeviceGbm *render_device_gbm;
+ 
+   renderer_gpu_data = meta_renderer_native_get_gpu_data (renderer_native,
+                                                          gpu_kms);
++  render_device = renderer_gpu_data->render_device;
+ 
+-  return renderer_gpu_data->gbm.device;
++  if (!META_IS_RENDER_DEVICE_GBM (render_device))
++    return NULL;
++
++  render_device_gbm = META_RENDER_DEVICE_GBM (render_device);
++  return meta_render_device_gbm_get_gbm_device (render_device_gbm);
+ }
+ 
+ MetaGpuKms *
+@@ -176,16 +188,23 @@
+ {
+   MetaGpuKms *gpu_kms = renderer_native->primary_gpu_kms;
+   MetaRendererNativeGpuData *renderer_gpu_data;
++  MetaRenderDevice *render_device;
+ 
+   renderer_gpu_data = meta_renderer_native_get_gpu_data (renderer_native,
+                                                          gpu_kms);
+-  return renderer_gpu_data->device_file;
++  render_device = renderer_gpu_data->render_device;
++  return meta_render_device_get_device_file (render_device);
+ }
+ 
+ static MetaRendererNativeGpuData *
+ meta_create_renderer_native_gpu_data (void)
+ {
+-  return g_new0 (MetaRendererNativeGpuData, 1);
++  MetaRendererNativeGpuData *renderer_gpu_data;
++
++  renderer_gpu_data = g_new0 (MetaRendererNativeGpuData, 1);
++  renderer_gpu_data->secondary.egl_context = EGL_NO_CONTEXT;
++
++  return renderer_gpu_data;
+ }
+ 
+ MetaEgl *
+@@ -220,6 +239,17 @@
+   return renderer_native->pending_mode_set;
+ }
+ 
++MetaRendererNativeMode
++meta_renderer_native_get_mode (MetaRendererNative *renderer_native)
++{
++  MetaGpuKms *primary_gpu = renderer_native->primary_gpu_kms;
++  MetaRendererNativeGpuData *primary_gpu_data;
++
++  primary_gpu_data = meta_renderer_native_get_gpu_data (renderer_native,
++                                                        primary_gpu);
++  return primary_gpu_data->mode;
++}
++
+ static void
+ meta_renderer_native_disconnect (CoglRenderer *cogl_renderer)
+ {
+@@ -236,6 +266,7 @@
+   MetaRendererNative *renderer_native = cogl_renderer->custom_winsys_user_data;
+   MetaGpuKms *gpu_kms;
+   MetaRendererNativeGpuData *renderer_gpu_data;
++  MetaRenderDevice *render_device;
+ 
+   cogl_renderer->winsys = g_new0 (CoglRendererEGL, 1);
+   cogl_renderer_egl = cogl_renderer->winsys;
+@@ -243,10 +274,11 @@
+   gpu_kms = meta_renderer_native_get_primary_gpu (renderer_native);
+   renderer_gpu_data = meta_renderer_native_get_gpu_data (renderer_native,
+                                                          gpu_kms);
++  render_device = renderer_gpu_data->render_device;
+ 
+   cogl_renderer_egl->platform_vtable = &_cogl_winsys_egl_vtable;
+   cogl_renderer_egl->platform = renderer_gpu_data;
+-  cogl_renderer_egl->edpy = renderer_gpu_data->egl_display;
++  cogl_renderer_egl->edpy = meta_render_device_get_egl_display (render_device);
+ 
+   if (!_cogl_winsys_egl_renderer_connect_common (cogl_renderer, error))
+     goto fail;
+@@ -779,56 +811,60 @@
+     {
+     case META_RENDERER_NATIVE_MODE_GBM:
+       {
++        MetaRenderDevice *render_device;
++        MetaDrmBufferFlags flags;
++        g_autoptr (MetaDrmBuffer) buffer = NULL;
++        int dmabuf_fd;
++        uint32_t stride;
++        uint32_t offset;
++        uint32_t bpp;
++        uint32_t modifier;
++        uint32_t format;
+         CoglFramebuffer *dmabuf_fb;
+         CoglDmaBufHandle *dmabuf_handle;
+-        struct gbm_bo *new_bo;
+-        int stride;
+-        int offset;
+-        int bpp;
+-        int dmabuf_fd = -1;
+-
+-        new_bo = gbm_bo_create (renderer_gpu_data->gbm.device,
+-                                width, height, DRM_FORMAT_XRGB8888,
+-                                GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+ 
+-        if (!new_bo)
+-          {
+-            g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+-                         "Failed to allocate buffer");
+-            return NULL;
+-          }
+ 
+-        dmabuf_fd = gbm_bo_get_fd (new_bo);
++        render_device = renderer_gpu_data->render_device;
++        flags = META_DRM_BUFFER_FLAG_NONE;
++        buffer = meta_render_device_allocate_dma_buf (render_device,
++                                                      width, height,
++                                                      DRM_FORMAT_XRGB8888,
++                                                      flags,
++                                                      error);
++        if (!buffer)
++          return NULL;
+ 
++        dmabuf_fd = meta_drm_buffer_export_fd (buffer, error);
+         if (dmabuf_fd == -1)
+-          {
+-            g_set_error (error, G_IO_ERROR, G_IO_ERROR_EXISTS,
+-                         "Failed to export buffer's DMA fd: %s",
+-                         g_strerror (errno));
+-            return NULL;
+-          }
++          return NULL;
++
++        stride = meta_drm_buffer_get_stride (buffer);
++        offset = meta_drm_buffer_get_offset (buffer, 0);
++        bpp = meta_drm_buffer_get_bpp (buffer);
++        modifier = meta_drm_buffer_get_modifier (buffer);
++        format = meta_drm_buffer_get_format (buffer);
+ 
+-        stride = gbm_bo_get_stride (new_bo);
+-        offset = gbm_bo_get_offset (new_bo, 0);
+-        bpp = 4;
+         dmabuf_fb =
+           meta_renderer_native_create_dma_buf_framebuffer (renderer_native,
+                                                            dmabuf_fd,
+                                                            width, height,
+                                                            stride,
+                                                            offset,
+-                                                           DRM_FORMAT_MOD_LINEAR,
+-                                                           DRM_FORMAT_XRGB8888,
++                                                           modifier,
++                                                           format,
+                                                            error);
+ 
+         if (!dmabuf_fb)
+-          return NULL;
++          {
++            close (dmabuf_fd);
++            return NULL;
++          }
+ 
+         dmabuf_handle =
+           cogl_dma_buf_handle_new (dmabuf_fb, dmabuf_fd,
+                                    width, height, stride, offset, bpp,
+-                                   new_bo,
+-                                   (GDestroyNotify) gbm_bo_destroy);
++                                   g_steal_pointer (&buffer),
++                                   g_object_unref);
+         g_object_unref (dmabuf_fb);
+         return dmabuf_handle;
+       }
+@@ -1419,12 +1455,27 @@
+                              GError                   **error)
+ {
+   MetaRendererNative *renderer_native = renderer_gpu_data->renderer_native;
++  MetaRenderDevice *render_device = renderer_gpu_data->render_device;
+   MetaEgl *egl = meta_renderer_native_get_egl (renderer_native);
+-  EGLDisplay egl_display = renderer_gpu_data->egl_display;
++  EGLDisplay egl_display;
+   EGLConfig egl_config;
+   EGLContext egl_context;
+   const char **missing_gl_extensions;
+-  const char *renderer_str;
++
++  egl_display = meta_render_device_get_egl_display (render_device);
++  if (egl_display == EGL_NO_DISPLAY)
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
++                   "No EGL display");
++      return FALSE;
++    }
++
++  if (!meta_render_device_is_hardware_accelerated (render_device))
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
++                   "Not hardware accelerated");
++      return FALSE;
++    }
+ 
+   meta_egl_bind_api (egl, EGL_OPENGL_ES_API, NULL);
+ 
+@@ -1432,7 +1483,8 @@
+                                     &egl_config, error))
+     goto err;
+ 
+-  egl_context = create_secondary_egl_context (egl, egl_display, egl_config, error);
++  egl_context = create_secondary_egl_context (egl, egl_display, egl_config,
++                                              error);
+   if (egl_context == EGL_NO_CONTEXT)
+     goto err;
+ 
+@@ -1449,17 +1501,6 @@
+       goto err;
+     }
+ 
+-  renderer_str = (const char *) glGetString (GL_RENDERER);
+-  if (g_str_has_prefix (renderer_str, "llvmpipe") ||
+-      g_str_has_prefix (renderer_str, "softpipe") ||
+-      g_str_has_prefix (renderer_str, "swrast"))
+-    {
+-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+-                   "Do not want to use software renderer (%s), falling back to CPU copy path",
+-                   renderer_str);
+-      goto err_fail_with_context;
+-    }
+-
+   if (!meta_gles3_has_extensions (renderer_native->gles3,
+                                   &missing_gl_extensions,
+                                   "GL_OES_EGL_image_external",
+@@ -1475,11 +1516,9 @@
+       g_free (missing_gl_extensions_str);
+       g_free (missing_gl_extensions);
+ 
+-      goto err_fail_with_context;
++      goto err_fail_make_current;
+     }
+ 
+-  renderer_gpu_data->secondary.is_hardware_rendering = TRUE;
+-  renderer_gpu_data->secondary.egl_context = egl_context;
+   renderer_gpu_data->secondary.egl_config = egl_config;
+   renderer_gpu_data->secondary.copy_mode = META_SHARED_FRAMEBUFFER_COPY_MODE_SECONDARY_GPU;
+ 
+@@ -1492,14 +1531,13 @@
+ 
+   return TRUE;
+ 
+-err_fail_with_context:
++err_fail_make_current:
+   meta_egl_make_current (egl,
+                          egl_display,
+                          EGL_NO_SURFACE,
+                          EGL_NO_SURFACE,
+                          EGL_NO_CONTEXT,
+                          NULL);
+-  meta_egl_destroy_context (egl, egl_display, egl_context, NULL);
+ 
+ err:
+   maybe_restore_cogl_egl_api (renderer_native);
+@@ -1510,8 +1548,6 @@
+ static void
+ init_secondary_gpu_data_cpu (MetaRendererNativeGpuData *renderer_gpu_data)
+ {
+-  renderer_gpu_data->secondary.is_hardware_rendering = FALSE;
+-
+   /* First try ZERO, it automatically falls back to PRIMARY as needed */
+   renderer_gpu_data->secondary.copy_mode =
+     META_SHARED_FRAMEBUFFER_COPY_MODE_ZERO;
+@@ -1539,329 +1575,79 @@
+   MetaRendererNativeGpuData *data;
+ 
+   data = meta_renderer_native_get_gpu_data (renderer_native, gpu_kms);
+-  return data->secondary.is_hardware_rendering;
+-}
+-
+-static EGLDisplay
+-init_gbm_egl_display (MetaRendererNative  *renderer_native,
+-                      struct gbm_device   *gbm_device,
+-                      GError             **error)
+-{
+-  MetaEgl *egl = meta_renderer_native_get_egl (renderer_native);
+-  EGLDisplay egl_display;
+-
+-  if (!meta_egl_has_extensions (egl, EGL_NO_DISPLAY, NULL,
+-                                "EGL_MESA_platform_gbm",
+-                                NULL) &&
+-      !meta_egl_has_extensions (egl, EGL_NO_DISPLAY, NULL,
+-                                "EGL_KHR_platform_gbm",
+-                                NULL))
+-    {
+-      g_set_error (error, G_IO_ERROR,
+-                   G_IO_ERROR_FAILED,
+-                   "Missing extension for GBM renderer: EGL_KHR_platform_gbm");
+-      return EGL_NO_DISPLAY;
+-    }
+-
+-  egl_display = meta_egl_get_platform_display (egl,
+-                                               EGL_PLATFORM_GBM_KHR,
+-                                               gbm_device, NULL, error);
+-  if (egl_display == EGL_NO_DISPLAY)
+-    return EGL_NO_DISPLAY;
+-
+-  if (!meta_egl_initialize (egl, egl_display, error))
+-    return EGL_NO_DISPLAY;
+-
+-  return egl_display;
++  return meta_render_device_is_hardware_accelerated (data->render_device);
+ }
+ 
+ static MetaRendererNativeGpuData *
+ create_renderer_gpu_data_gbm (MetaRendererNative  *renderer_native,
+                               MetaDeviceFile      *device_file,
++                              MetaGpuKms          *gpu_kms,
+                               GError             **error)
+ {
+-  struct gbm_device *gbm_device;
++  MetaRenderer *renderer = META_RENDERER (renderer_native);
++  MetaBackend *backend = meta_renderer_get_backend (renderer);
++  MetaRenderDeviceGbm *render_device_gbm;
+   MetaRendererNativeGpuData *renderer_gpu_data;
+-  g_autoptr (GError) local_error = NULL;
+ 
+-  gbm_device = gbm_create_device (meta_device_file_get_fd (device_file));
+-  if (!gbm_device)
+-    {
+-      g_set_error (error, G_IO_ERROR,
+-                   G_IO_ERROR_FAILED,
+-                   "Failed to create gbm device: %s", g_strerror (errno));
+-      return NULL;
+-    }
++  render_device_gbm = meta_render_device_gbm_new (backend, device_file, error);
++  if (!render_device_gbm)
++    return NULL;
+ 
+   renderer_gpu_data = meta_create_renderer_native_gpu_data ();
+-  renderer_gpu_data->device_file = meta_device_file_acquire (device_file);
+   renderer_gpu_data->renderer_native = renderer_native;
+-  renderer_gpu_data->gbm.device = gbm_device;
+   renderer_gpu_data->mode = META_RENDERER_NATIVE_MODE_GBM;
+-
+-  renderer_gpu_data->egl_display = init_gbm_egl_display (renderer_native,
+-                                                         gbm_device,
+-                                                         &local_error);
+-  if (renderer_gpu_data->egl_display == EGL_NO_DISPLAY)
+-    {
+-      g_debug ("GBM EGL init for %s failed: %s",
+-               meta_device_file_get_path (device_file),
+-               local_error->message);
+-
+-      init_secondary_gpu_data_cpu (renderer_gpu_data);
+-      return renderer_gpu_data;
+-    }
++  renderer_gpu_data->render_device = META_RENDER_DEVICE (render_device_gbm);
+ 
+   init_secondary_gpu_data (renderer_gpu_data);
+   return renderer_gpu_data;
+ }
+ 
+-static EGLDisplay
+-init_surfaceless_egl_display (MetaRendererNative  *renderer_native,
+-                              GError             **error)
+-{
+-  MetaEgl *egl = meta_renderer_native_get_egl (renderer_native);
+-  EGLDisplay egl_display;
+-
+-  if (!meta_egl_has_extensions (egl, EGL_NO_DISPLAY, NULL,
+-                                "EGL_MESA_platform_surfaceless",
+-                                NULL))
+-    {
+-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+-                   "Missing EGL platform required for surfaceless context: "
+-                   "EGL_MESA_platform_surfaceless");
+-      return EGL_NO_DISPLAY;
+-    }
+-
+-  egl_display = meta_egl_get_platform_display (egl,
+-                                               EGL_PLATFORM_SURFACELESS_MESA,
+-                                               EGL_DEFAULT_DISPLAY,
+-                                               NULL, error);
+-  if (egl_display == EGL_NO_DISPLAY)
+-    return EGL_NO_DISPLAY;
+-
+-  if (!meta_egl_initialize (egl, egl_display, error))
+-    return EGL_NO_DISPLAY;
+-
+-  if (!meta_egl_has_extensions (egl, egl_display, NULL,
+-                                "EGL_KHR_no_config_context",
+-                                NULL))
+-    {
+-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+-                   "Missing EGL extension required for surfaceless context: "
+-                   "EGL_KHR_no_config_context");
+-      return EGL_NO_DISPLAY;
+-    }
+-
+-  return egl_display;
+-}
+-
+ static MetaRendererNativeGpuData *
+ create_renderer_gpu_data_surfaceless (MetaRendererNative  *renderer_native,
+                                       GError             **error)
+ {
++  MetaRenderer *renderer = META_RENDERER (renderer_native);
++  MetaBackend *backend = meta_renderer_get_backend (renderer);
++  MetaRenderDeviceSurfaceless *render_device_surfaceless;
+   MetaRendererNativeGpuData *renderer_gpu_data;
+-  EGLDisplay egl_display;
+ 
+-  egl_display = init_surfaceless_egl_display (renderer_native, error);
+-  if (egl_display == EGL_NO_DISPLAY)
++  render_device_surfaceless = meta_render_device_surfaceless_new (backend,
++                                                                  error);
++  if (!render_device_surfaceless)
+     return NULL;
+ 
+   renderer_gpu_data = meta_create_renderer_native_gpu_data ();
+   renderer_gpu_data->renderer_native = renderer_native;
+   renderer_gpu_data->mode = META_RENDERER_NATIVE_MODE_SURFACELESS;
+-  renderer_gpu_data->egl_display = egl_display;
++  renderer_gpu_data->render_device =
++    META_RENDER_DEVICE (render_device_surfaceless);
+ 
+   return renderer_gpu_data;
+ }
+ 
+ #ifdef HAVE_EGL_DEVICE
+-static const char *
+-get_drm_device_file (MetaEgl     *egl,
+-                     EGLDeviceEXT device,
+-                     GError     **error)
+-{
+-  if (!meta_egl_egl_device_has_extensions (egl, device,
+-                                           NULL,
+-                                           "EGL_EXT_device_drm",
+-                                           NULL))
+-    {
+-      g_set_error (error, G_IO_ERROR,
+-                   G_IO_ERROR_FAILED,
+-                   "Missing required EGLDevice extension EGL_EXT_device_drm");
+-      return NULL;
+-    }
+-
+-  return meta_egl_query_device_string (egl, device,
+-                                       EGL_DRM_DEVICE_FILE_EXT,
+-                                       error);
+-}
+-
+-static EGLDeviceEXT
+-find_egl_device (MetaRendererNative  *renderer_native,
+-                 MetaDeviceFile      *device_file,
+-                 GError             **error)
+-{
+-  MetaEgl *egl = meta_renderer_native_get_egl (renderer_native);
+-  const char **missing_extensions;
+-  EGLint num_devices;
+-  EGLDeviceEXT *devices;
+-  const char *kms_file_path;
+-  EGLDeviceEXT device;
+-  EGLint i;
+-
+-  if (!meta_egl_has_extensions (egl,
+-                                EGL_NO_DISPLAY,
+-                                &missing_extensions,
+-                                "EGL_EXT_device_base",
+-                                NULL))
+-    {
+-      char *missing_extensions_str;
+-
+-      missing_extensions_str = g_strjoinv (", ", (char **) missing_extensions);
+-      g_set_error (error, G_IO_ERROR,
+-                   G_IO_ERROR_FAILED,
+-                   "Missing EGL extensions required for EGLDevice renderer: %s",
+-                   missing_extensions_str);
+-      g_free (missing_extensions_str);
+-      g_free (missing_extensions);
+-      return EGL_NO_DEVICE_EXT;
+-    }
+-
+-  if (!meta_egl_query_devices (egl, 0, NULL, &num_devices, error))
+-    return EGL_NO_DEVICE_EXT;
+-
+-  devices = g_new0 (EGLDeviceEXT, num_devices);
+-  if (!meta_egl_query_devices (egl, num_devices, devices, &num_devices,
+-                               error))
+-    {
+-      g_free (devices);
+-      return EGL_NO_DEVICE_EXT;
+-    }
+-
+-  kms_file_path = meta_device_file_get_path (device_file);
+-
+-  device = EGL_NO_DEVICE_EXT;
+-  for (i = 0; i < num_devices; i++)
+-    {
+-      const char *egl_device_drm_path;
+-
+-      g_clear_error (error);
+-
+-      egl_device_drm_path = get_drm_device_file (egl, devices[i], error);
+-      if (!egl_device_drm_path)
+-        continue;
+-
+-      if (g_str_equal (egl_device_drm_path, kms_file_path))
+-        {
+-          device = devices[i];
+-          break;
+-        }
+-    }
+-  g_free (devices);
+-
+-  if (device == EGL_NO_DEVICE_EXT)
+-    {
+-      if (!*error)
+-        g_set_error (error, G_IO_ERROR,
+-                     G_IO_ERROR_FAILED,
+-                     "Failed to find matching EGLDeviceEXT");
+-      return EGL_NO_DEVICE_EXT;
+-    }
+-
+-  return device;
+-}
+-
+-static EGLDisplay
+-get_egl_device_display (MetaRendererNative  *renderer_native,
+-                        MetaDeviceFile      *device_file,
+-                        EGLDeviceEXT         egl_device,
+-                        GError             **error)
+-{
+-  MetaEgl *egl = meta_renderer_native_get_egl (renderer_native);
+-  int kms_fd = meta_device_file_get_fd (device_file);
+-  EGLint platform_attribs[] = {
+-    EGL_DRM_MASTER_FD_EXT, kms_fd,
+-    EGL_NONE
+-  };
+-
+-  return meta_egl_get_platform_display (egl, EGL_PLATFORM_DEVICE_EXT,
+-                                        (void *) egl_device,
+-                                        platform_attribs,
+-                                        error);
+-}
+-
+-static int
+-count_drm_devices (MetaRendererNative *renderer_native)
+-{
+-  MetaRenderer *renderer = META_RENDERER (renderer_native);
+-  MetaBackend *backend = meta_renderer_get_backend (renderer);
+-
+-  return g_list_length (meta_backend_get_gpus (backend));
+-}
+-
+ static MetaRendererNativeGpuData *
+ create_renderer_gpu_data_egl_device (MetaRendererNative  *renderer_native,
+                                      MetaDeviceFile      *device_file,
++                                     MetaGpuKms          *gpu_kms,
+                                      GError             **error)
+ {
+-  MetaEgl *egl = meta_renderer_native_get_egl (renderer_native);
+-  const char **missing_extensions;
+-  EGLDeviceEXT egl_device;
+-  EGLDisplay egl_display;
++  MetaRenderer *renderer = META_RENDERER (renderer_native);
++  MetaBackend *backend = meta_renderer_get_backend (renderer);
++  MetaRenderDeviceEglStream *render_device_egl_stream;
+   MetaRendererNativeGpuData *renderer_gpu_data;
+ 
+-  if (count_drm_devices (renderer_native) != 1)
+-    {
+-      g_set_error (error, G_IO_ERROR,
+-                   G_IO_ERROR_FAILED,
+-                   "EGLDevice currently only works with single GPU systems");
+-      return NULL;
+-    }
+-
+-  egl_device = find_egl_device (renderer_native, device_file, error);
+-  if (egl_device == EGL_NO_DEVICE_EXT)
+-    return NULL;
+-
+-  egl_display = get_egl_device_display (renderer_native, device_file,
+-                                        egl_device, error);
+-  if (egl_display == EGL_NO_DISPLAY)
+-    return NULL;
+-
+-  if (!meta_egl_initialize (egl, egl_display, error))
++  render_device_egl_stream = meta_render_device_egl_stream_new (backend,
++                                                                device_file,
++                                                                error);
++  if (!render_device_egl_stream)
+     return NULL;
+ 
+-  if (!meta_egl_has_extensions (egl,
+-                                egl_display,
+-                                &missing_extensions,
+-                                "EGL_NV_output_drm_flip_event",
+-                                "EGL_EXT_output_base",
+-                                "EGL_EXT_output_drm",
+-                                "EGL_KHR_stream",
+-                                "EGL_KHR_stream_producer_eglsurface",
+-                                "EGL_EXT_stream_consumer_egloutput",
+-                                "EGL_EXT_stream_acquire_mode",
+-                                NULL))
+-    {
+-      char *missing_extensions_str;
+-
+-      missing_extensions_str = g_strjoinv (", ", (char **) missing_extensions);
+-      g_set_error (error, G_IO_ERROR,
+-                   G_IO_ERROR_FAILED,
+-                   "Missing EGL extensions required for EGLDevice renderer: %s",
+-                   missing_extensions_str);
+-      meta_egl_terminate (egl, egl_display, NULL);
+-      g_free (missing_extensions_str);
+-      g_free (missing_extensions);
+-      return NULL;
+-    }
+-
+   renderer_gpu_data = meta_create_renderer_native_gpu_data ();
+-  renderer_gpu_data->device_file = meta_device_file_acquire (device_file);
+   renderer_gpu_data->renderer_native = renderer_native;
+-  renderer_gpu_data->egl.device = egl_device;
+   renderer_gpu_data->mode = META_RENDERER_NATIVE_MODE_EGL_DEVICE;
+-  renderer_gpu_data->egl_display = egl_display;
++  renderer_gpu_data->render_device =
++    META_RENDER_DEVICE (render_device_egl_stream);
+ 
+   return renderer_gpu_data;
+ }
+@@ -1876,11 +1662,12 @@
+   MetaBackend *backend = meta_renderer_get_backend (renderer);
+   MetaDevicePool *device_pool =
+     meta_backend_native_get_device_pool (META_BACKEND_NATIVE (backend));
+-  MetaRendererNativeGpuData *renderer_gpu_data;
++  MetaRendererNativeGpuData *gbm_renderer_gpu_data;
+   MetaDeviceFileFlags device_file_flags = META_DEVICE_FILE_FLAG_NONE;
+   g_autoptr (MetaDeviceFile) device_file = NULL;
+   GError *gbm_error = NULL;
+ #ifdef HAVE_EGL_DEVICE
++  MetaRendererNativeGpuData *egl_stream_renderer_gpu_data;
+   GError *egl_device_error = NULL;
+ #endif
+ 
+@@ -1898,29 +1685,34 @@
+   if (!device_file)
+     return NULL;
+ 
+-#ifdef HAVE_EGL_DEVICE
+-  /* Try to initialize the EGLDevice backend first. Whenever we use a
+-   * non-NVIDIA GPU, the EGLDevice enumeration function won't find a match, and
+-   * we'll fall back to GBM (which will always succeed as it has a software
+-   * rendering fallback)
+-   */
+-  renderer_gpu_data = create_renderer_gpu_data_egl_device (renderer_native,
+-                                                           device_file,
+-                                                           &egl_device_error);
+-  if (renderer_gpu_data)
+-    return renderer_gpu_data;
+-#endif
+-
+-  renderer_gpu_data = create_renderer_gpu_data_gbm (renderer_native,
+-                                                    device_file,
+-                                                    &gbm_error);
+-  if (renderer_gpu_data)
++  gbm_renderer_gpu_data = create_renderer_gpu_data_gbm (renderer_native,
++                                                        device_file,
++                                                        gpu_kms,
++                                                        &gbm_error);
++  if (gbm_renderer_gpu_data)
+     {
++      MetaRenderDevice *render_device = gbm_renderer_gpu_data->render_device;
++
++      if (meta_render_device_is_hardware_accelerated (render_device))
++        return gbm_renderer_gpu_data;
++    }
++
+ #ifdef HAVE_EGL_DEVICE
+-      g_error_free (egl_device_error);
+-#endif
+-      return renderer_gpu_data;
++  egl_stream_renderer_gpu_data =
++    create_renderer_gpu_data_egl_device (renderer_native,
++                                         device_file,
++                                         gpu_kms,
++                                         &egl_device_error);
++  if (egl_stream_renderer_gpu_data)
++    {
++      g_clear_pointer (&gbm_renderer_gpu_data,
++                       meta_renderer_native_gpu_data_free);
++      return egl_stream_renderer_gpu_data;
+     }
++#endif
++
++  if (gbm_renderer_gpu_data)
++    return gbm_renderer_gpu_data;
+ 
+   g_set_error (error, G_IO_ERROR,
+                G_IO_ERROR_FAILED,
+@@ -1943,6 +1735,24 @@
+   return NULL;
+ }
+ 
++static const char *
++renderer_data_mode_to_string (MetaRendererNativeMode mode)
++{
++  switch (mode)
++    {
++    case META_RENDERER_NATIVE_MODE_GBM:
++      return "gbm";
++    case META_RENDERER_NATIVE_MODE_SURFACELESS:
++      return "surfaceless";
++#ifdef HAVE_EGL_DEVICE
++    case META_RENDERER_NATIVE_MODE_EGL_DEVICE:
++      return "egldevice";
++#endif
++    }
++
++  g_assert_not_reached ();
++}
++
+ static gboolean
+ create_renderer_gpu_data (MetaRendererNative  *renderer_native,
+                           MetaGpuKms          *gpu_kms,
+@@ -1957,6 +1767,18 @@
+   if (!renderer_gpu_data)
+     return FALSE;
+ 
++  if (gpu_kms)
++    {
++      g_message ("Created %s renderer for '%s'",
++                 renderer_data_mode_to_string (renderer_gpu_data->mode),
++                 meta_gpu_kms_get_file_path (gpu_kms));
++    }
++  else
++    {
++      g_message ("Created %s renderer without GPU",
++                 renderer_data_mode_to_string (renderer_gpu_data->mode));
++    }
++
+   g_hash_table_insert (renderer_native->gpu_datas,
+                        gpu_kms,
+                        renderer_gpu_data);
+@@ -2112,11 +1934,13 @@
+ {
+   MetaGpuKms *gpu_kms;
+   MetaRendererNativeGpuData *renderer_gpu_data;
++  MetaRenderDevice *render_device;
+ 
+   gpu_kms = choose_primary_gpu_unchecked (backend, renderer_native);
+   renderer_gpu_data = meta_renderer_native_get_gpu_data (renderer_native,
+                                                          gpu_kms);
+-  if (renderer_gpu_data->egl_display == EGL_NO_DISPLAY)
++  render_device = renderer_gpu_data->render_device;
++  if (meta_render_device_get_egl_display (render_device) == EGL_NO_DISPLAY)
+     {
+       g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                    "The GPU %s chosen as primary is not supported by EGL.",
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-renderer-native.h package.new/mutter/src/backends/native/meta-renderer-native.h
+--- package.orig/mutter/src/backends/native/meta-renderer-native.h	2021-11-10 10:39:31.524825996 -0330
++++ package.new/mutter/src/backends/native/meta-renderer-native.h	2021-11-10 10:44:04.420409185 -0330
+@@ -68,4 +68,6 @@
+ 
+ gboolean meta_renderer_native_use_modifiers (MetaRendererNative *renderer_native);
+ 
++MetaRendererNativeMode meta_renderer_native_get_mode (MetaRendererNative *renderer_native);
++
+ #endif /* META_RENDERER_NATIVE_H */
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/backends/native/meta-renderer-native-private.h package.new/mutter/src/backends/native/meta-renderer-native-private.h
+--- package.orig/mutter/src/backends/native/meta-renderer-native-private.h	2021-11-10 10:39:31.524825996 -0330
++++ package.new/mutter/src/backends/native/meta-renderer-native-private.h	2021-11-10 10:43:43.522299551 -0330
+@@ -29,6 +29,7 @@
+ #define META_RENDERER_NATIVE_PRIVATE_H
+ 
+ #include "backends/meta-gles3.h"
++#include "backends/native/meta-backend-native-types.h"
+ #include "backends/native/meta-renderer-native.h"
+ 
+ typedef enum _MetaSharedFramebufferCopyMode
+@@ -49,28 +50,15 @@
+ {
+   MetaRendererNative *renderer_native;
+ 
+-  MetaDeviceFile *device_file;
+-
+-  struct {
+-    struct gbm_device *device;
+-  } gbm;
+-
+-#ifdef HAVE_EGL_DEVICE
+-  struct {
+-    EGLDeviceEXT device;
+-  } egl;
+-#endif
++  MetaRenderDevice *render_device;
+ 
+   MetaRendererNativeMode mode;
+ 
+-  EGLDisplay egl_display;
+-
+   /*
+    * Fields used for blitting iGPU framebuffer content onto dGPU framebuffers.
+    */
+   struct {
+     MetaSharedFramebufferCopyMode copy_mode;
+-    gboolean is_hardware_rendering;
+     gboolean has_EGL_EXT_image_dma_buf_import_modifiers;
+ 
+     /* For GPU blit mode */
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/core/util.c package.new/mutter/src/core/util.c
+--- package.orig/mutter/src/core/util.c	2021-11-10 10:39:31.527825990 -0330
++++ package.new/mutter/src/core/util.c	2021-11-10 10:42:17.158948405 -0330
+@@ -71,6 +71,7 @@
+   { "screen-cast", META_DEBUG_SCREEN_CAST },
+   { "remote-desktop", META_DEBUG_REMOTE_DESKTOP },
+   { "backend", META_DEBUG_BACKEND },
++  { "render", META_DEBUG_RENDER },
+ };
+ 
+ #ifdef WITH_VERBOSE_MODE
+@@ -319,6 +320,8 @@
+       return "DBUS";
+     case META_DEBUG_INPUT:
+       return "INPUT";
++    case META_DEBUG_WAYLAND:
++      return "WAYLAND";
+     case META_DEBUG_KMS:
+       return "KMS";
+     case META_DEBUG_SCREEN_CAST:
+@@ -327,10 +330,10 @@
+       return "REMOTE_DESKTOP";
+     case META_DEBUG_BACKEND:
+       return "BACKEND";
++    case META_DEBUG_RENDER:
++      return "RENDER";
+     case META_DEBUG_VERBOSE:
+       return "VERBOSE";
+-    case META_DEBUG_WAYLAND:
+-      return "WAYLAND";
+     }
+ 
+   return "WM";
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/meson.build package.new/mutter/src/meson.build
+--- package.orig/mutter/src/meson.build	2021-11-10 10:39:31.536825974 -0330
++++ package.new/mutter/src/meson.build	2021-11-10 10:42:55.637083654 -0330
+@@ -460,6 +460,13 @@
+   'x11/xprops.h',
+ ]
+ 
++if have_egl_device
++  mutter_sources += [
++    'backends/native/meta-render-device-egl-stream.c',
++    'backends/native/meta-render-device-egl-stream.h',
++  ]
++endif
++
+ if have_egl
+   mutter_sources += [
+     'backends/meta-egl.c',
+@@ -748,6 +755,13 @@
+     'backends/native/meta-onscreen-native.h',
+     'backends/native/meta-pointer-constraint-native.c',
+     'backends/native/meta-pointer-constraint-native.h',
++    'backends/native/meta-render-device-gbm.c',
++    'backends/native/meta-render-device-gbm.h',
++    'backends/native/meta-render-device-private.h',
++    'backends/native/meta-render-device-surfaceless.c',
++    'backends/native/meta-render-device-surfaceless.h',
++    'backends/native/meta-render-device.c',
++    'backends/native/meta-render-device.h',
+     'backends/native/meta-renderer-native-gles3.c',
+     'backends/native/meta-renderer-native-gles3.h',
+     'backends/native/meta-renderer-native-private.h',
+@@ -790,6 +804,7 @@
+ if have_native_backend
+   mutter_private_enum_sources += [
+     'backends/native/meta-backend-native-types.h',
++    'backends/native/meta-drm-buffer.h',
+     'backends/native/meta-kms-types.h',
+   ]
+ endif
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/meta/util.h package.new/mutter/src/meta/util.h
+--- package.orig/mutter/src/meta/util.h	2021-11-10 10:39:31.528825988 -0330
++++ package.new/mutter/src/meta/util.h	2021-11-10 10:42:17.158948405 -0330
+@@ -80,6 +80,7 @@
+  * @META_DEBUG_SCREEN_CAST: screencasting
+  * @META_DEBUG_REMOTE_DESKTOP: remote desktop
+  * @META_DEBUG_BACKEND: backend
++ * @META_DEBUG_RENDER: native backend rendering
+  */
+ typedef enum
+ {
+@@ -109,6 +110,7 @@
+   META_DEBUG_SCREEN_CAST     = 1 << 22,
+   META_DEBUG_REMOTE_DESKTOP  = 1 << 23,
+   META_DEBUG_BACKEND         = 1 << 24,
++  META_DEBUG_RENDER          = 1 << 25,
+ } MetaDebugTopic;
+ 
+ /**
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/wayland/meta-wayland-buffer.c package.new/mutter/src/wayland/meta-wayland-buffer.c
+--- package.orig/mutter/src/wayland/meta-wayland-buffer.c	2021-11-10 10:39:31.535825976 -0330
++++ package.new/mutter/src/wayland/meta-wayland-buffer.c	2021-11-10 10:42:55.637083654 -0330
+@@ -694,6 +694,7 @@
+   uint32_t drm_format;
+   uint64_t drm_modifier;
+   uint32_t stride;
++  MetaDrmBufferFlags flags;
+   MetaDrmBufferGbm *fb;
+   g_autoptr (GError) error = NULL;
+ 
+@@ -719,10 +720,11 @@
+       return NULL;
+     }
+ 
+-  fb = meta_drm_buffer_gbm_new_take (device_file,
+-                                     gbm_bo,
+-                                     drm_modifier != DRM_FORMAT_MOD_INVALID,
+-                                     &error);
++  flags = META_DRM_BUFFER_FLAG_NONE;
++  if (drm_modifier == DRM_FORMAT_MOD_INVALID)
++    flags |= META_DRM_BUFFER_FLAG_DISABLE_MODIFIERS;
++
++  fb = meta_drm_buffer_gbm_new_take (device_file, gbm_bo, flags, &error);
+   if (!fb)
+     {
+       g_debug ("Failed to create scanout buffer: %s", error->message);
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/wayland/meta-wayland.c package.new/mutter/src/wayland/meta-wayland.c
+--- package.orig/mutter/src/wayland/meta-wayland.c	2021-11-10 10:39:31.535825976 -0330
++++ package.new/mutter/src/wayland/meta-wayland.c	2021-11-10 10:44:04.421409190 -0330
+@@ -51,6 +51,10 @@
+ #include "wayland/meta-xwayland-private.h"
+ #include "wayland/meta-xwayland.h"
+ 
++#ifdef HAVE_NATIVE_BACKEND
++#include "backends/native/meta-renderer-native.h"
++#endif
++
+ static char *_display_name_override;
+ 
+ G_DEFINE_TYPE (MetaWaylandCompositor, meta_wayland_compositor, G_TYPE_OBJECT)
+@@ -573,8 +577,25 @@
+                                   compositor);
+ 
+ #ifdef HAVE_WAYLAND_EGLSTREAM
+-  meta_wayland_eglstream_controller_init (compositor);
+-#endif
++    {
++      gboolean should_enable_eglstream_controller = TRUE;
++#if defined(HAVE_EGL_DEVICE) && defined(HAVE_NATIVE_BACKEND)
++      MetaRenderer *renderer = meta_backend_get_renderer (backend);
++
++      if (META_IS_RENDERER_NATIVE (renderer))
++        {
++          MetaRendererNative *renderer_native = META_RENDERER_NATIVE (renderer);
++
++          if (meta_renderer_native_get_mode (renderer_native) ==
++              META_RENDERER_NATIVE_MODE_GBM)
++            should_enable_eglstream_controller = FALSE;
++        }
++#endif /* defined(HAVE_EGL_DEVICE) && defined(HAVE_NATIVE_BACKEND) */
++
++      if (should_enable_eglstream_controller)
++        meta_wayland_eglstream_controller_init (compositor);
++    }
++#endif /* HAVE_WAYLAND_EGLSTREAM */
+ 
+   x11_display_policy =
+     meta_context_get_x11_display_policy (compositor->context);
+diff --unified --recursive --text --exclude .git -N package.orig/mutter/src/wayland/meta-wayland-dma-buf.c package.new/mutter/src/wayland/meta-wayland-dma-buf.c
+--- package.orig/mutter/src/wayland/meta-wayland-dma-buf.c	2021-11-10 10:39:31.535825976 -0330
++++ package.new/mutter/src/wayland/meta-wayland-dma-buf.c	2021-11-10 10:42:55.637083654 -0330
+@@ -295,6 +295,7 @@
+   struct gbm_bo *gbm_bo;
+   gboolean use_modifier;
+   g_autoptr (GError) error = NULL;
++  MetaDrmBufferFlags flags;
+   MetaDrmBufferGbm *fb;
+ 
+   for (n_planes = 0; n_planes < META_WAYLAND_DMA_BUF_MAX_FDS; n_planes++)
+@@ -321,10 +322,11 @@
+       return NULL;
+     }
+ 
+-  fb = meta_drm_buffer_gbm_new_take (device_file,
+-                                     gbm_bo,
+-                                     use_modifier,
+-                                     &error);
++  flags = META_DRM_BUFFER_FLAG_NONE;
++  if (!use_modifier)
++    flags |= META_DRM_BUFFER_FLAG_DISABLE_MODIFIERS;
++
++  fb = meta_drm_buffer_gbm_new_take (device_file, gbm_bo, flags, &error);
+   if (!fb)
+     {
+       g_debug ("Failed to create scanout buffer: %s", error->message);
